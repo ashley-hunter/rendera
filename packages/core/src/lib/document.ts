@@ -395,13 +395,24 @@ export class SceneDocument {
    */
   getWorldBounds(id: NodeId): Bounds | null {
     const node = this.require(id);
+    const parentWorld =
+      node.parentId === null ? IDENTITY : this.getWorldMatrix(node.parentId);
+    return this.worldBoundsWithin(node, parentWorld);
+  }
+
+  // The parent's world matrix is threaded through the recursion so a subtree
+  // walk composes each node's local matrix onto its parent once, instead of
+  // re-walking to the root per node. (A dirty-tracked world-matrix cache and a
+  // children index are deferred; see docs/ROADMAP.md.)
+  private worldBoundsWithin(node: SceneNode, parentWorld: Mat2D): Bounds | null {
+    const world = multiply(parentWorld, this.getLocalMatrix(node));
     const local = this.registry.require(node.type).getLocalBounds(node);
     if (local) {
-      return transformBounds(this.getWorldMatrix(id), local);
+      return transformBounds(world, local);
     }
     let result: Bounds | null = null;
-    for (const child of this.getChildren(id)) {
-      const childBounds = this.getWorldBounds(child.id);
+    for (const child of this.getChildren(node.id)) {
+      const childBounds = this.worldBoundsWithin(child, world);
       if (childBounds) {
         result = result ? unionBounds(result, childBounds) : childBounds;
       }
@@ -415,18 +426,23 @@ export class SceneDocument {
    * children before their parent.
    */
   hitTest(point: Vec2): SceneNode | undefined {
-    return this.hitTestNode(this.root, point);
+    return this.hitTestWithin(this.root, IDENTITY, point);
   }
 
-  private hitTestNode(node: SceneNode, point: Vec2): SceneNode | undefined {
+  private hitTestWithin(
+    node: SceneNode,
+    parentWorld: Mat2D,
+    point: Vec2
+  ): SceneNode | undefined {
+    const world = multiply(parentWorld, this.getLocalMatrix(node));
     const children = this.getChildren(node.id);
     for (let i = children.length - 1; i >= 0; i--) {
-      const hit = this.hitTestNode(children[i], point);
+      const hit = this.hitTestWithin(children[i], world, point);
       if (hit) {
         return hit;
       }
     }
-    const inverse = invert(this.getWorldMatrix(node.id));
+    const inverse = invert(world);
     if (inverse) {
       const local = transformPoint(inverse, point);
       if (this.registry.require(node.type).hitTestLocal(node, local)) {

@@ -139,6 +139,12 @@ Unblocked by the model (ADR 0004/0006); built last.
 - **Performance:** tiling, dirty-rect, viewport culling, OffscreenCanvas + worker
   rendering, GPU-memory budgets, WebGPU render bundles. Maintain a real mobile
   **device matrix** (Adreno / Mali / Apple) — GPU/driver variance is a known risk.
+- **Deferred kernel performance** (correctness-neutral, API-transparent — do
+  together, benchmark-driven, alongside the render loop and culling/selection):
+  a children/parent index (today `getChildren` scans the whole node map), a
+  dirty-tracked world-matrix cache, and a spatial broad-phase (quadtree/R-tree)
+  for hit-testing and culling. Hit-test/bounds already thread the parent world
+  matrix through recursion, so the O(depth) re-walk is gone.
 - **Mobile-first input:** pointer/pressure/tilt/gestures from Phase 1.
 - **Storybook showcases every capability** (a hard project requirement).
 - **Multiplayer-readiness preserved** (flat store, scoped diff undo, fractional

@@ -121,6 +121,26 @@ describe('hit testing', () => {
     expect(doc.hitTest(vec2(10, 10))?.id).toBe(front.id);
   });
 
+  it('composes transforms through nested containers', () => {
+    const doc = newDoc();
+    const outer = doc.insert<GroupNode>({
+      type: 'group',
+      name: 'outer',
+      transform: createTransform({ translation: vec2(100, 0) }),
+    });
+    const inner = doc.insert<GroupNode>(
+      { type: 'group', name: 'inner', transform: createTransform({ translation: vec2(0, 50) }) },
+      { parentId: outer.id }
+    );
+    const l = doc.insert<LayerNode>(
+      { type: 'layer', name: 'l', size: vec2(20, 20) },
+      { parentId: inner.id }
+    );
+    // layer origin -> +inner(0,50) -> +outer(100,0) = (100,50)
+    expect(doc.hitTest(vec2(110, 60))?.id).toBe(l.id);
+    expect(doc.hitTest(vec2(10, 10))).toBeUndefined();
+  });
+
   it('respects rotation via the inverse world transform', () => {
     const doc = newDoc();
     // A 20x20 layer rotated 45deg about its centre pivot, centred at (100,100).
