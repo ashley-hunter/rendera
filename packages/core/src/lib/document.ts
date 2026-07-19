@@ -18,14 +18,18 @@ import {
   type ChangeSet,
   type NodeChange,
 } from './changes';
+import { transformBounds, unionBounds, type Bounds } from './bounds';
 import { createIdFactory, type IdFactory, type NodeId } from './id';
-import type { DocumentNode, NodeInput, SceneNode } from './node';
+import { IDENTITY, invert, multiply, transformPoint, type Mat2D } from './matrix';
+import type { DocumentNode, NodeInput, SceneNode, SpatialNode } from './node';
 import {
   generateKeyBetween,
   validateOrderKey,
   type OrderKey,
 } from './ordering';
 import { createDefaultRegistry, NodeRegistry } from './registry';
+import { toMatrix } from './transform';
+import type { Vec2 } from './vec2';
 
 /** Where to place a node among its parent's children. */
 export type InsertPosition =
@@ -244,7 +248,14 @@ export class SceneDocument {
         parentId,
         options.position ?? DEFAULT_POSITION
       );
-      const node = { ...input, id: this.newId(), parentId, index } as N;
+      const defaults = this.registry.require(input.type).createDefaults();
+      const node = {
+        ...defaults,
+        ...input,
+        id: this.newId(),
+        parentId,
+        index,
+      } as unknown as N;
       this.commit({ op: 'add', id: node.id, node });
       return node;
     });
@@ -356,6 +367,73 @@ export class SceneDocument {
     doc.rootId = root.id;
     doc.validateIntegrity();
     return doc;
+  }
+
+  // --- spatial queries -----------------------------------------------------
+
+  /** The node's local-to-parent matrix (identity for non-spatial nodes). */
+  getLocalMatrix(node: SceneNode): Mat2D {
+    return this.registry.require(node.type).isSpatial()
+      ? toMatrix((node as SpatialNode).transform)
+      : IDENTITY;
+  }
+
+  /** The node's local-to-world matrix, composing all ancestor transforms. */
+  getWorldMatrix(id: NodeId): Mat2D {
+    const node = this.require(id);
+    let world: Mat2D = IDENTITY;
+    for (const ancestor of this.getAncestors(id).reverse()) {
+      world = multiply(world, this.getLocalMatrix(ancestor));
+    }
+    return multiply(world, this.getLocalMatrix(node));
+  }
+
+  /**
+   * The node's world-space axis-aligned bounds. Leaf geometry is transformed
+   * into world space; a container's bounds are the union of its children's.
+   * Returns `null` when the node (and its subtree) has no geometry.
+   */
+  getWorldBounds(id: NodeId): Bounds | null {
+    const node = this.require(id);
+    const local = this.registry.require(node.type).getLocalBounds(node);
+    if (local) {
+      return transformBounds(this.getWorldMatrix(id), local);
+    }
+    let result: Bounds | null = null;
+    for (const child of this.getChildren(id)) {
+      const childBounds = this.getWorldBounds(child.id);
+      if (childBounds) {
+        result = result ? unionBounds(result, childBounds) : childBounds;
+      }
+    }
+    return result;
+  }
+
+  /**
+   * The top-most node whose geometry contains `point` (in world space), or
+   * `undefined`. Walks siblings front-to-back (highest index first) and
+   * children before their parent.
+   */
+  hitTest(point: Vec2): SceneNode | undefined {
+    return this.hitTestNode(this.root, point);
+  }
+
+  private hitTestNode(node: SceneNode, point: Vec2): SceneNode | undefined {
+    const children = this.getChildren(node.id);
+    for (let i = children.length - 1; i >= 0; i--) {
+      const hit = this.hitTestNode(children[i], point);
+      if (hit) {
+        return hit;
+      }
+    }
+    const inverse = invert(this.getWorldMatrix(node.id));
+    if (inverse) {
+      const local = transformPoint(inverse, point);
+      if (this.registry.require(node.type).hitTestLocal(node, local)) {
+        return node;
+      }
+    }
+    return undefined;
   }
 
   // --- internals -----------------------------------------------------------

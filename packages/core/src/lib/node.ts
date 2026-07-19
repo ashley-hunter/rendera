@@ -5,10 +5,17 @@
  * Records hold *data only* — behaviour lives in per-type utils (see
  * `registry.ts`). Hierarchy is encoded as `parentId` plus a fractional
  * `index` order key; the tree is derived, never stored as nested arrays.
+ *
+ * Nodes that participate in the transform hierarchy are `SpatialNode`s and
+ * carry a decomposed `transform` (ADR 0006). The document root is a fixed,
+ * non-spatial origin. `transform` and `size` are filled with defaults by the
+ * store when omitted from an insert (see the node utils' `createDefaults`).
  */
 
-import type { NodeId } from './id';
+import type { Transform } from './transform';
 import type { OrderKey } from './ordering';
+import type { NodeId } from './id';
+import type { Vec2 } from './vec2';
 
 /** The common shape of every node record. */
 export interface SceneNode {
@@ -21,31 +28,44 @@ export interface SceneNode {
   index: OrderKey;
 }
 
-/** The single root of a document. */
+/** A node that participates in the transform hierarchy. */
+export interface SpatialNode extends SceneNode {
+  /** Decomposed local transform relative to the parent (ADR 0006). */
+  transform: Transform;
+}
+
+/** The single, non-spatial root of a document (the coordinate origin). */
 export interface DocumentNode extends SceneNode {
   readonly type: 'document';
   parentId: null;
   name: string;
 }
 
-/** A container that groups other nodes under a shared transform (later). */
-export interface GroupNode extends SceneNode {
+/** A container that groups other nodes under a shared transform. */
+export interface GroupNode extends SpatialNode {
   readonly type: 'group';
   name: string;
 }
 
-/** A leaf content node (raster/vector specifics come in later phases). */
-export interface LayerNode extends SceneNode {
+/** A leaf content node. Its local geometry is a `size`-sized rectangle until
+ * a real raster/vector geometry replaces it in a later phase. */
+export interface LayerNode extends SpatialNode {
   readonly type: 'layer';
   name: string;
+  /** Local rectangular extent (top-left at the local origin). */
+  size: Vec2;
 }
 
 /** The built-in node types known to the default registry. */
 export type KnownNode = DocumentNode | GroupNode | LayerNode;
 
-/** The fields a caller supplies when inserting a node (id/parent/index are
- * assigned by the document). */
+/**
+ * The fields a caller supplies when inserting a node. `id`/`parentId`/`index`
+ * are assigned by the document; `transform`/`size` are optional and default via
+ * the node util.
+ */
 export type NodeInput<N extends SceneNode = SceneNode> = Omit<
   N,
-  'id' | 'parentId' | 'index'
->;
+  'id' | 'parentId' | 'index' | 'transform' | 'size'
+> &
+  Partial<Pick<N, Extract<keyof N, 'transform' | 'size'>>>;

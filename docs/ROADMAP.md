@@ -37,6 +37,12 @@ The authoritative model and all the math, fully unit-tested without a canvas.
 - ✅ **Transform math:** `vec2`, `Mat2D` affine (compose/invert/point+vector),
   decomposed **TRS(+skew)** transform with derived matrix, and AABB `bounds`
   (union/contains/intersect/transform). (ADR 0006)
+- ✅ **Spatial model:** `SpatialNode` carries a transform; world-matrix
+  composition, world bounds (leaf rect / container union), and geometric
+  hit-testing (top-most, z-ordered) via util-owned local geometry.
+- ⬜ **Camera & coordinate spaces:** screen/world/local; `screenToWorld` /
+  `worldToScreen` / viewport bounds (DPR deferred to the backend).
+- ⬜ **Selection, spatial index, input (`PointerInput`) + tools.**
 - **Camera & coordinate spaces:** screen/world/local; `screenToWorld` /
   `worldToScreen` / viewport bounds (DPR deferred to the backend).
 - **Selection model:** object selection (node ids) + a pixel-selection region type.

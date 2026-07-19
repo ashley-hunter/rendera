@@ -3,19 +3,33 @@
  *
  * Behaviour for each node `type` lives in a `NodeUtil`, looked up by type —
  * never stored on the record itself (ADR 0004). This keeps records plain data
- * and the core open to new node types without touching the store. Geometry,
- * bounds, and hit-testing utils arrive in later phases; for now a util just
- * declares whether the type may contain children.
+ * and the core open to new node types without touching the store. A util
+ * declares whether the type may contain children and whether it is spatial,
+ * provides default data for omitted fields, and answers geometry queries
+ * (local bounds and local hit-testing). Real raster/vector geometry replaces
+ * the built-in rectangle per-type in later phases.
  */
 
-import type { SceneNode } from './node';
+import { boundsFromRect, type Bounds } from './bounds';
+import type { LayerNode, SceneNode } from './node';
+import { IDENTITY_TRANSFORM } from './transform';
+import { type Vec2, ZERO } from './vec2';
 
 /** Behaviour associated with a single node `type`. */
-export interface NodeUtil<N extends SceneNode = SceneNode> {
+export interface NodeUtil {
   /** The node type this util handles. */
-  readonly type: N['type'];
+  readonly type: string;
   /** Whether nodes of this type may contain children. */
   canHaveChildren(): boolean;
+  /** Whether nodes of this type carry a transform. */
+  isSpatial(): boolean;
+  /** Default data for fields omitted on insert (e.g. transform, size). */
+  createDefaults(): Record<string, unknown>;
+  /** Local-space bounds of a node's own geometry, or `null` if it has none
+   * (e.g. a container, whose bounds derive from its children). */
+  getLocalBounds(node: SceneNode): Bounds | null;
+  /** Whether a point in the node's local space is inside its geometry. */
+  hitTestLocal(node: SceneNode, pointLocal: Vec2): boolean;
 }
 
 /** A mutable lookup of `type` -> `NodeUtil`. */
@@ -51,20 +65,43 @@ export class NodeRegistry {
   }
 }
 
-function leafUtil<T extends string>(type: T): NodeUtil<SceneNode & { type: T }> {
-  return { type, canHaveChildren: () => false };
-}
+const documentUtil: NodeUtil = {
+  type: 'document',
+  canHaveChildren: () => true,
+  isSpatial: () => false,
+  createDefaults: () => ({}),
+  getLocalBounds: () => null,
+  hitTestLocal: () => false,
+};
 
-function containerUtil<T extends string>(
-  type: T
-): NodeUtil<SceneNode & { type: T }> {
-  return { type, canHaveChildren: () => true };
-}
+const groupUtil: NodeUtil = {
+  type: 'group',
+  canHaveChildren: () => true,
+  isSpatial: () => true,
+  createDefaults: () => ({ transform: IDENTITY_TRANSFORM }),
+  getLocalBounds: () => null,
+  hitTestLocal: () => false,
+};
+
+const layerUtil: NodeUtil = {
+  type: 'layer',
+  canHaveChildren: () => false,
+  isSpatial: () => true,
+  createDefaults: () => ({ transform: IDENTITY_TRANSFORM, size: ZERO }),
+  getLocalBounds: (node) => {
+    const { size } = node as LayerNode;
+    return boundsFromRect(0, 0, size.x, size.y);
+  },
+  hitTestLocal: (node, p) => {
+    const { size } = node as LayerNode;
+    return p.x >= 0 && p.y >= 0 && p.x <= size.x && p.y <= size.y;
+  },
+};
 
 /** A registry pre-populated with the built-in node types. */
 export function createDefaultRegistry(): NodeRegistry {
   return new NodeRegistry()
-    .register(containerUtil('document'))
-    .register(containerUtil('group'))
-    .register(leafUtil('layer'));
+    .register(documentUtil)
+    .register(groupUtil)
+    .register(layerUtil);
 }
