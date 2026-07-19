@@ -46,6 +46,7 @@ export class WebGpuScene {
   private resizeObserver?: ResizeObserver;
   private lastScreen: Vec2 | null = null;
   private dragging = false;
+  private frame = 0;
 
   /** Device-init state: 'pending' -> 'ready' | 'unsupported'. */
   readonly renderState = signal<Status>('pending');
@@ -163,7 +164,23 @@ export class WebGpuScene {
     canvas.height = Math.max(1, Math.round(rect.height));
   }
 
+  /**
+   * Coalesce draw requests into a single render per animation frame. Presenting
+   * to a WebGPU canvas must happen inside the frame callback so the swapchain
+   * texture is the one the compositor will show (multiple `draw()` calls in one
+   * task collapse to one GPU submit).
+   */
   private draw(): void {
+    if (!this.renderer || this.frame) {
+      return;
+    }
+    this.frame = requestAnimationFrame(() => {
+      this.frame = 0;
+      this.drawNow();
+    });
+  }
+
+  private drawNow(): void {
     if (!this.renderer) {
       return;
     }

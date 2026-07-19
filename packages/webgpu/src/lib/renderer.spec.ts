@@ -5,6 +5,7 @@ import {
   createTransform,
   SceneDocument,
   vec2,
+  type GroupNode,
   type LayerNode,
 } from '@rendera/core';
 import { encode8, linearToSrgb } from './color';
@@ -108,4 +109,43 @@ describe('WebGpuRenderer colour pipeline', () => {
 
     renderer.destroy();
   });
+
+  it('renders the sample scene at story scale (non-empty)', async () => {
+    const doc = SceneDocument.create({ idFactory: createSequentialIdFactory('n') });
+    const g = doc.insert<GroupNode>({
+      type: 'group',
+      name: 'g',
+      transform: createTransform({ translation: vec2(80, 70) }),
+    });
+    doc.insert<LayerNode>({ type: 'layer', name: 'A', size: vec2(120, 80) }, { parentId: g.id });
+    doc.insert<LayerNode>(
+      { type: 'layer', name: 'C', size: vec2(110, 60), transform: createTransform({ translation: vec2(280, 40) }) }
+    );
+    const items = buildRenderList(doc, createCamera({ pan: vec2(20, 20) }));
+
+    const canvas = document.createElement('canvas');
+    canvas.width = 866;
+    canvas.height = 439;
+    const renderer = await WebGpuRenderer.create(canvas, { colorSpace: 'srgb', dither: true });
+    renderer.setClearColor({ r: 0.02, g: 0.02, b: 0.03, a: 1 });
+    renderer.setRenderList(items);
+    const rb = await renderer.readback();
+
+    let colored = 0;
+    for (let i = 0; i < rb.data.length; i += 4) {
+      if (Math.max(rb.data[i], rb.data[i + 1], rb.data[i + 2]) > 40) {
+        colored++;
+      }
+    }
+    expect(items.length).toBe(2);
+    expect(colored).toBeGreaterThan(0);
+
+    renderer.destroy();
+  });
+
+  // NOTE: the on-screen canvas *swapchain* present cannot be verified here —
+  // SwiftShader (the headless software adapter) does not produce readable/
+  // compositable canvas pixels. The render pipeline itself is proven by the
+  // readback tests above (which own the target texture). The canvas path is
+  // exercised on real hardware via the `WebGpuScene` Storybook story.
 });
