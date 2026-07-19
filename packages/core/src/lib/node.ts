@@ -56,8 +56,25 @@ export interface LayerNode extends SpatialNode {
   size: Vec2;
 }
 
+/**
+ * A leaf raster node: a `size`-sized rectangle textured by an image asset. The
+ * pixels live out-of-band in the backend (e.g. a WebGPU texture cache) and are
+ * referenced by `assetId` — the model holds only the reference, extent, and
+ * opacity, so big binary data never enters the node store, diffs, or undo.
+ */
+export interface ImageNode extends SpatialNode {
+  readonly type: 'image';
+  name: string;
+  /** Local rectangular extent (top-left at the local origin). */
+  size: Vec2;
+  /** Opaque handle to the pixel asset, resolved by the renderer. */
+  assetId: string;
+  /** Layer opacity in [0, 1] (defaults to 1). */
+  opacity?: number;
+}
+
 /** The built-in node types known to the default registry. */
-export type KnownNode = DocumentNode | GroupNode | LayerNode;
+export type KnownNode = DocumentNode | GroupNode | LayerNode | ImageNode;
 
 /**
  * The fields a caller supplies when inserting a node. `id`/`parentId`/`index`

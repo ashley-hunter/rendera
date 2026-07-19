@@ -10,8 +10,26 @@
  * it. Tiling, real fills, and blend modes are later slices.
  */
 
-import type { QuadDrawItem } from '@rendera/core';
+import type { ImageDrawItem, RenderItem } from '@rendera/core';
 import { blueNoiseTile, BLUE_NOISE_SIZE } from './blue-noise';
+
+/** A decoded image source the renderer can upload (browser image types). */
+export type ImageSource = ImageBitmap | HTMLCanvasElement | OffscreenCanvas;
+
+/** GPU resources for the textured-image and mip-generation pipelines. */
+interface ImageResources {
+  pipeline: GPURenderPipeline;
+  texLayout: GPUBindGroupLayout;
+  sampler: GPUSampler;
+  mipPipeline: GPURenderPipeline;
+  mipLayout: GPUBindGroupLayout;
+  mipSampler: GPUSampler;
+}
+
+interface CachedImage {
+  texture: GPUTexture;
+  bindGroup: GPUBindGroup;
+}
 
 export interface RendererColor {
   r: number;
@@ -105,7 +123,109 @@ fn linear_to_srgb(c : f32) -> f32 {
 }
 `;
 
+// Textured-quad pipeline. Samples an sRGB-view texture (hardware decodes to
+// linear), so mip generation and filtering all happen in linear light. Output
+// is premultiplied linear for the `over` blend into the scene target.
+const IMAGE_SHADER = /* wgsl */ `
+struct Viewport { size : vec2f, _pad : vec2f };
+@group(0) @binding(0) var<uniform> vp : Viewport;
+@group(1) @binding(0) var tex : texture_2d<f32>;
+@group(1) @binding(1) var samp : sampler;
+
+struct VOut {
+  @builtin(position) pos : vec4f,
+  @location(0) uv : vec2f,
+  @location(1) opacity : f32,
+};
+
+@vertex fn vs(
+  @location(0) corner : vec2f,
+  @location(1) m0 : vec2f,
+  @location(2) m1 : vec2f,
+  @location(3) m2 : vec2f,
+  @location(4) opacity : f32
+) -> VOut {
+  let screen = m0 * corner.x + m1 * corner.y + m2;
+  let clip = vec2f(screen.x / vp.size.x * 2.0 - 1.0, 1.0 - screen.y / vp.size.y * 2.0);
+  var out : VOut;
+  out.pos = vec4f(clip, 0.0, 1.0);
+  out.uv = corner;
+  out.opacity = opacity;
+  return out;
+}
+
+// Catmull-Rom cubic weights for a fractional offset in [0,1].
+fn cubic(t : f32) -> vec4f {
+  let t2 = t * t;
+  let t3 = t2 * t;
+  return 0.5 * vec4f(
+    -t3 + 2.0 * t2 - t,
+    3.0 * t3 - 5.0 * t2 + 2.0,
+    -3.0 * t3 + 4.0 * t2 + t,
+    t3 - t2
+  );
+}
+
+// Bicubic (Catmull-Rom) magnification: 16 taps around the sample point, giving
+// smooth-yet-sharp upscaling instead of blocky bilinear. Used when magnifying;
+// minification falls through to the hardware sampler's mip/anisotropic path.
+fn sampleBicubic(uv : vec2f) -> vec4f {
+  let dims = vec2f(textureDimensions(tex, 0));
+  let coord = uv * dims - 0.5;
+  let f = fract(coord);
+  let base = floor(coord);
+  let wx = cubic(f.x);
+  let wy = cubic(f.y);
+  var acc = vec4f(0.0);
+  for (var j = 0; j < 4; j = j + 1) {
+    var row = vec4f(0.0);
+    for (var i = 0; i < 4; i = i + 1) {
+      let p = (base + vec2f(f32(i) - 1.0, f32(j) - 1.0) + 0.5) / dims;
+      row = row + textureSampleLevel(tex, samp, p, 0.0) * wx[i];
+    }
+    acc = acc + row * wy[j];
+  }
+  return acc;
+}
+
+@fragment fn fs(@location(0) uv : vec2f, @location(1) opacity : f32) -> @location(0) vec4f {
+  // Both samples are computed in uniform control flow (textureSample needs
+  // implicit derivatives), then selected by the screen-space texel footprint:
+  // < 1 texel/pixel means magnifying -> bicubic; otherwise the hardware
+  // trilinear + anisotropic sample handles minification cleanly.
+  let dims = vec2f(textureDimensions(tex, 0));
+  let footprint = max(length(dpdx(uv * dims)), length(dpdy(uv * dims)));
+  let hw = textureSample(tex, samp, uv);
+  let bicubic = sampleBicubic(uv);
+  let c = select(hw, bicubic, footprint < 1.0);
+  let a = clamp(c.a, 0.0, 1.0) * opacity;
+  return vec4f(c.rgb * a, a); // premultiplied linear
+}
+`;
+
+// Mip-generation blit: box-downsample the previous level with a linear sampler.
+// Both views are sRGB, so the average is computed in linear light.
+const MIP_SHADER = /* wgsl */ `
+@group(0) @binding(0) var src : texture_2d<f32>;
+@group(0) @binding(1) var samp : sampler;
+
+struct VOut { @builtin(position) pos : vec4f, @location(0) uv : vec2f };
+
+@vertex fn vs(@builtin(vertex_index) i : u32) -> VOut {
+  var p = array<vec2f, 3>(vec2f(-1.0, -1.0), vec2f(3.0, -1.0), vec2f(-1.0, 3.0));
+  var out : VOut;
+  out.pos = vec4f(p[i], 0.0, 1.0);
+  out.uv = vec2f((p[i].x + 1.0) * 0.5, 1.0 - (p[i].y + 1.0) * 0.5);
+  return out;
+}
+
+@fragment fn fs(@location(0) uv : vec2f) -> @location(0) vec4f {
+  return textureSample(src, samp, uv);
+}
+`;
+
 const SCENE_FORMAT: GPUTextureFormat = 'rgba16float';
+const IMAGE_FORMAT: GPUTextureFormat = 'rgba8unorm-srgb';
 
 export class WebGpuRenderer {
   private background: RendererColor = { r: 0, g: 0, b: 0, a: 1 };
@@ -123,6 +243,11 @@ export class WebGpuRenderer {
   private instanceCapacity = 0;
   private instanceCount = 0;
 
+  private readonly imageCache = new Map<string, CachedImage>();
+  private imageInstanceBuffer: GPUBuffer | null = null;
+  private imageInstanceCapacity = 0;
+  private imageDraws: readonly ImageDrawItem[] = [];
+
   private constructor(
     private readonly device: GPUDevice,
     private readonly context: GPUCanvasContext | null,
@@ -136,6 +261,7 @@ export class WebGpuRenderer {
     private readonly viewportBuffer: GPUBuffer,
     private readonly unitQuadBuffer: GPUBuffer,
     private readonly noiseTexture: GPUTexture,
+    private readonly image: ImageResources,
     width: number,
     height: number,
     supersample: number
@@ -267,6 +393,82 @@ export class WebGpuRenderer {
       [BLUE_NOISE_SIZE, BLUE_NOISE_SIZE]
     );
 
+    // --- image pipeline (textured quads -> linear scene target) ---
+    const imageModule = device.createShaderModule({ code: IMAGE_SHADER });
+    const imageTexLayout = device.createBindGroupLayout({
+      entries: [
+        { binding: 0, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'float' } },
+        { binding: 1, visibility: GPUShaderStage.FRAGMENT, sampler: { type: 'filtering' } },
+      ],
+    });
+    const imagePipeline = device.createRenderPipeline({
+      layout: device.createPipelineLayout({ bindGroupLayouts: [quadLayout, imageTexLayout] }),
+      vertex: {
+        module: imageModule,
+        entryPoint: 'vs',
+        buffers: [
+          { arrayStride: 8, stepMode: 'vertex', attributes: [{ shaderLocation: 0, offset: 0, format: 'float32x2' }] },
+          {
+            arrayStride: 32,
+            stepMode: 'instance',
+            attributes: [
+              { shaderLocation: 1, offset: 0, format: 'float32x2' },
+              { shaderLocation: 2, offset: 8, format: 'float32x2' },
+              { shaderLocation: 3, offset: 16, format: 'float32x2' },
+              { shaderLocation: 4, offset: 24, format: 'float32' },
+            ],
+          },
+        ],
+      },
+      fragment: {
+        module: imageModule,
+        entryPoint: 'fs',
+        targets: [
+          {
+            format: SCENE_FORMAT,
+            blend: {
+              color: { srcFactor: 'one', dstFactor: 'one-minus-src-alpha', operation: 'add' },
+              alpha: { srcFactor: 'one', dstFactor: 'one-minus-src-alpha', operation: 'add' },
+            },
+          },
+        ],
+      },
+      primitive: { topology: 'triangle-strip' },
+    });
+    // Trilinear + anisotropic for clean minification; linear magnify (the shader
+    // upgrades magnification to bicubic itself).
+    const imageSampler = device.createSampler({
+      magFilter: 'linear',
+      minFilter: 'linear',
+      mipmapFilter: 'linear',
+      maxAnisotropy: 16,
+    });
+
+    // --- mip generation (linear box-downsample per level) ---
+    const mipModule = device.createShaderModule({ code: MIP_SHADER });
+    const mipLayout = device.createBindGroupLayout({
+      entries: [
+        { binding: 0, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'float' } },
+        { binding: 1, visibility: GPUShaderStage.FRAGMENT, sampler: { type: 'filtering' } },
+      ],
+    });
+    const mipPipeline = device.createRenderPipeline({
+      layout: device.createPipelineLayout({ bindGroupLayouts: [mipLayout] }),
+      vertex: { module: mipModule, entryPoint: 'vs' },
+      fragment: { module: mipModule, entryPoint: 'fs', targets: [{ format: IMAGE_FORMAT }] },
+      primitive: { topology: 'triangle-list' },
+    });
+    const mipSampler = device.createSampler({ magFilter: 'linear', minFilter: 'linear' });
+
+    const imageResources: ImageResources = {
+      pipeline: imagePipeline,
+      texLayout: imageTexLayout,
+      sampler: imageSampler,
+      mipPipeline,
+      mipLayout,
+      mipSampler,
+    };
+
     const width = Math.max(1, canvas.width || 1);
     const height = Math.max(1, canvas.height || 1);
 
@@ -283,12 +485,87 @@ export class WebGpuRenderer {
       viewportBuffer,
       unitQuadBuffer,
       noiseTexture,
+      imageResources,
       width,
       height,
       options.supersample ?? 2
     );
     renderer.setDither(options.dither ?? true);
     return renderer;
+  }
+
+  /**
+   * Decode+upload an image under `assetId`, building a full mip chain in linear
+   * light. Idempotent per id: a re-register replaces the previous texture. The
+   * matching `ImageNode`/render-list `assetId` then resolves to this texture.
+   */
+  registerImage(assetId: string, source: ImageSource): void {
+    const width = source.width;
+    const height = source.height;
+    if (width < 1 || height < 1) {
+      throw new Error(`image "${assetId}" has zero size`);
+    }
+    const mipLevelCount = Math.floor(Math.log2(Math.max(width, height))) + 1;
+    const texture = this.device.createTexture({
+      size: [width, height],
+      format: IMAGE_FORMAT,
+      mipLevelCount,
+      usage:
+        GPUTextureUsage.TEXTURE_BINDING |
+        GPUTextureUsage.COPY_DST |
+        GPUTextureUsage.RENDER_ATTACHMENT,
+    });
+    this.device.queue.copyExternalImageToTexture(
+      { source },
+      { texture, mipLevel: 0 },
+      [width, height]
+    );
+    this.generateMips(texture, mipLevelCount);
+
+    const bindGroup = this.device.createBindGroup({
+      layout: this.image.texLayout,
+      entries: [
+        { binding: 0, resource: texture.createView() },
+        { binding: 1, resource: this.image.sampler },
+      ],
+    });
+    this.imageCache.get(assetId)?.texture.destroy();
+    this.imageCache.set(assetId, { texture, bindGroup });
+  }
+
+  /** Whether an image asset has been registered. */
+  hasImage(assetId: string): boolean {
+    return this.imageCache.has(assetId);
+  }
+
+  /** Drop a registered image and free its texture. */
+  disposeImage(assetId: string): void {
+    this.imageCache.get(assetId)?.texture.destroy();
+    this.imageCache.delete(assetId);
+  }
+
+  /** Fill levels 1..n by repeatedly box-downsampling the previous level. */
+  private generateMips(texture: GPUTexture, levels: number): void {
+    const encoder = this.device.createCommandEncoder();
+    for (let level = 1; level < levels; level++) {
+      const srcView = texture.createView({ baseMipLevel: level - 1, mipLevelCount: 1 });
+      const dstView = texture.createView({ baseMipLevel: level, mipLevelCount: 1 });
+      const bindGroup = this.device.createBindGroup({
+        layout: this.image.mipLayout,
+        entries: [
+          { binding: 0, resource: srcView },
+          { binding: 1, resource: this.image.mipSampler },
+        ],
+      });
+      const pass = encoder.beginRenderPass({
+        colorAttachments: [{ view: dstView, loadOp: 'clear', storeOp: 'store', clearValue: { r: 0, g: 0, b: 0, a: 0 } }],
+      });
+      pass.setPipeline(this.image.mipPipeline);
+      pass.setBindGroup(0, bindGroup);
+      pass.draw(3);
+      pass.end();
+    }
+    this.device.queue.submit([encoder.finish()]);
   }
 
   /** Set the linear-light background colour of the scene. */
@@ -301,36 +578,69 @@ export class WebGpuRenderer {
     this.writeParams();
   }
 
-  /** Upload the quads to draw (screen-space transform + linear colour each). */
-  setRenderList(items: readonly QuadDrawItem[]): void {
-    this.instanceCount = items.length;
-    if (items.length === 0) {
-      return;
-    }
-    const data = new Float32Array(items.length * 10);
-    items.forEach((item, i) => {
-      const o = i * 10;
-      const m = item.transform;
-      data[o] = m.a;
-      data[o + 1] = m.b;
-      data[o + 2] = m.c;
-      data[o + 3] = m.d;
-      data[o + 4] = m.e;
-      data[o + 5] = m.f;
-      data[o + 6] = item.color.r;
-      data[o + 7] = item.color.g;
-      data[o + 8] = item.color.b;
-      data[o + 9] = item.color.a;
-    });
-    if (!this.instanceBuffer || this.instanceCapacity < data.byteLength) {
-      this.instanceBuffer?.destroy();
-      this.instanceBuffer = this.device.createBuffer({
-        size: data.byteLength,
-        usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST,
+  /** Upload the draw list: solid quads (instanced) and textured image quads. */
+  setRenderList(items: readonly RenderItem[]): void {
+    const solids = items.filter((i): i is Extract<RenderItem, { kind: 'solid' }> => i.kind === 'solid');
+    this.imageDraws = items.filter((i): i is ImageDrawItem => i.kind === 'image');
+
+    this.instanceCount = solids.length;
+    if (solids.length > 0) {
+      const data = new Float32Array(solids.length * 10);
+      solids.forEach((item, i) => {
+        const o = i * 10;
+        const m = item.transform;
+        data[o] = m.a;
+        data[o + 1] = m.b;
+        data[o + 2] = m.c;
+        data[o + 3] = m.d;
+        data[o + 4] = m.e;
+        data[o + 5] = m.f;
+        data[o + 6] = item.color.r;
+        data[o + 7] = item.color.g;
+        data[o + 8] = item.color.b;
+        data[o + 9] = item.color.a;
       });
-      this.instanceCapacity = data.byteLength;
+      this.instanceBuffer = this.ensureBuffer(this.instanceBuffer, data.byteLength, 'instance');
+      this.instanceCapacity = Math.max(this.instanceCapacity, data.byteLength);
+      this.device.queue.writeBuffer(this.instanceBuffer, 0, data);
     }
-    this.device.queue.writeBuffer(this.instanceBuffer, 0, data);
+
+    // Image instance data: transform (m0,m1,m2) + opacity, 8 floats (32 bytes).
+    if (this.imageDraws.length > 0) {
+      const data = new Float32Array(this.imageDraws.length * 8);
+      this.imageDraws.forEach((item, i) => {
+        const o = i * 8;
+        const m = item.transform;
+        data[o] = m.a;
+        data[o + 1] = m.b;
+        data[o + 2] = m.c;
+        data[o + 3] = m.d;
+        data[o + 4] = m.e;
+        data[o + 5] = m.f;
+        data[o + 6] = item.opacity;
+        data[o + 7] = 0;
+      });
+      this.imageInstanceBuffer = this.ensureBuffer(
+        this.imageInstanceBuffer,
+        data.byteLength,
+        'image-instance'
+      );
+      this.imageInstanceCapacity = Math.max(this.imageInstanceCapacity, data.byteLength);
+      this.device.queue.writeBuffer(this.imageInstanceBuffer, 0, data);
+    }
+  }
+
+  /** Grow a vertex buffer if needed, returning one at least `byteLength` big. */
+  private ensureBuffer(existing: GPUBuffer | null, byteLength: number, label: string): GPUBuffer {
+    if (existing && existing.size >= byteLength) {
+      return existing;
+    }
+    existing?.destroy();
+    return this.device.createBuffer({
+      label,
+      size: byteLength,
+      usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST,
+    });
   }
 
   resize(width: number, height: number): void {
@@ -385,6 +695,11 @@ export class WebGpuRenderer {
     this.unitQuadBuffer.destroy();
     this.noiseTexture.destroy();
     this.instanceBuffer?.destroy();
+    this.imageInstanceBuffer?.destroy();
+    for (const { texture } of this.imageCache.values()) {
+      texture.destroy();
+    }
+    this.imageCache.clear();
   }
 
   private encode(encoder: GPUCommandEncoder, targetView: GPUTextureView): void {
@@ -405,6 +720,22 @@ export class WebGpuRenderer {
       scenePass.setVertexBuffer(0, this.unitQuadBuffer);
       scenePass.setVertexBuffer(1, this.instanceBuffer);
       scenePass.draw(4, this.instanceCount);
+    }
+    // Image quads: one draw per image (its own texture), selecting its instance
+    // slot via firstInstance. Skips assets that are not yet registered.
+    if (this.imageDraws.length > 0 && this.imageInstanceBuffer) {
+      scenePass.setPipeline(this.image.pipeline);
+      scenePass.setBindGroup(0, this.quadBindGroup);
+      scenePass.setVertexBuffer(0, this.unitQuadBuffer);
+      scenePass.setVertexBuffer(1, this.imageInstanceBuffer);
+      this.imageDraws.forEach((item, i) => {
+        const cached = this.imageCache.get(item.assetId);
+        if (!cached) {
+          return;
+        }
+        scenePass.setBindGroup(1, cached.bindGroup);
+        scenePass.draw(4, 1, 0, i);
+      });
     }
     scenePass.end();
 

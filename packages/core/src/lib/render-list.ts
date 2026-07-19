@@ -16,6 +16,7 @@ import { worldToScreenMatrix, type Camera } from './camera';
 import type { SceneDocument } from './document';
 import type { NodeId } from './id';
 import { compose, fromScaling, fromTranslation, type Mat2D } from './matrix';
+import type { ImageNode } from './node';
 import { vec2 } from './vec2';
 
 /** A linear-light RGBA colour, components in [0, 1]. */
@@ -26,19 +27,36 @@ export interface LinearRgba {
   readonly a: number;
 }
 
-/** A single quad to draw. */
-export interface QuadDrawItem {
+/** Fields shared by every draw item: a node id and a unit-square -> screen map. */
+interface DrawItemBase {
   readonly nodeId: NodeId;
   /** Maps the unit square [0,1]^2 to screen space (logical px): includes the
    * node's local geometry, world transform, and the camera. */
   readonly transform: Mat2D;
+}
+
+/** A flat-coloured quad (the debug-fill / solid case). */
+export interface QuadDrawItem extends DrawItemBase {
+  readonly kind: 'solid';
   /** Linear-light fill colour. */
   readonly color: LinearRgba;
 }
 
-/** Flatten the drawable nodes of `doc` into screen-space quads via `camera`. */
-export function buildRenderList(doc: SceneDocument, camera: Camera): QuadDrawItem[] {
-  const items: QuadDrawItem[] = [];
+/** A textured quad, sampling the backend asset referenced by `assetId`. */
+export interface ImageDrawItem extends DrawItemBase {
+  readonly kind: 'image';
+  /** Opaque handle the renderer resolves to a GPU texture. */
+  readonly assetId: string;
+  /** Layer opacity in [0, 1]. */
+  readonly opacity: number;
+}
+
+/** A single item to draw, back-to-front. */
+export type RenderItem = QuadDrawItem | ImageDrawItem;
+
+/** Flatten the drawable nodes of `doc` into screen-space draw items via `camera`. */
+export function buildRenderList(doc: SceneDocument, camera: Camera): RenderItem[] {
+  const items: RenderItem[] = [];
   const worldToScreen = worldToScreenMatrix(camera);
 
   const visit = (id: NodeId): void => {
@@ -50,7 +68,19 @@ export function buildRenderList(doc: SceneDocument, camera: Camera): QuadDrawIte
         fromScaling(vec2(boundsWidth(local), boundsHeight(local)))
       );
       const transform = compose(worldToScreen, doc.getWorldMatrix(id), localFromUnit);
-      items.push({ nodeId: id, transform, color: debugColorForId(id) });
+      const node = doc.get(id);
+      if (node?.type === 'image') {
+        const image = node as ImageNode;
+        items.push({
+          kind: 'image',
+          nodeId: id,
+          transform,
+          assetId: image.assetId,
+          opacity: image.opacity ?? 1,
+        });
+      } else {
+        items.push({ kind: 'solid', nodeId: id, transform, color: debugColorForId(id) });
+      }
     }
     for (const child of doc.getChildren(id)) {
       visit(child.id);

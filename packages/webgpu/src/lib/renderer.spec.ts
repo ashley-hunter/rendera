@@ -6,10 +6,23 @@ import {
   SceneDocument,
   vec2,
   type GroupNode,
+  type ImageNode,
   type LayerNode,
 } from '@rendera/core';
 import { encode8, linearToSrgb } from './color';
 import { WebGpuRenderer, type ReadbackResult } from './renderer';
+
+/** A solid-colour image bitmap of the given size (sRGB 8-bit values). */
+async function solidImage(size: number, r: number, g: number, b: number): Promise<ImageBitmap> {
+  const data = new Uint8ClampedArray(size * size * 4);
+  for (let i = 0; i < size * size; i++) {
+    data[i * 4] = r;
+    data[i * 4 + 1] = g;
+    data[i * 4 + 2] = b;
+    data[i * 4 + 3] = 255;
+  }
+  return createImageBitmap(new ImageData(data, size, size));
+}
 
 function makeCanvas(size: number): HTMLCanvasElement {
   const canvas = document.createElement('canvas');
@@ -82,8 +95,8 @@ describe('WebGpuRenderer colour pipeline', () => {
     });
     const items = buildRenderList(doc, createCamera());
     const item = items.find((i) => i.nodeId === layer.id);
-    if (!item) {
-      throw new Error('no quad for layer');
+    if (!item || item.kind !== 'solid') {
+      throw new Error('no solid quad for layer');
     }
 
     const renderer = await WebGpuRenderer.create(makeCanvas(64), {
@@ -212,6 +225,105 @@ describe('WebGpuRenderer colour pipeline', () => {
     expect(partial1).toBeLessThanOrEqual(2);
     expect(partial2).toBeGreaterThan(partial1);
     expect(partial2).toBeGreaterThan(10);
+  });
+
+  it('draws a registered image layer, round-tripping sRGB through linear', async () => {
+    const doc = SceneDocument.create({ idFactory: createSequentialIdFactory('n') });
+    const image = doc.insert<ImageNode>({
+      type: 'image',
+      name: 'img',
+      size: vec2(32, 32),
+      assetId: 'grey',
+      transform: createTransform({ translation: vec2(16, 16) }),
+    });
+    const items = buildRenderList(doc, createCamera());
+    expect(items.some((i) => i.kind === 'image' && i.nodeId === image.id)).toBe(true);
+
+    const renderer = await WebGpuRenderer.create(makeCanvas(64), {
+      colorSpace: 'srgb',
+      dither: false,
+    });
+    renderer.setClearColor({ r: 0, g: 0, b: 0, a: 1 });
+    // Mid-grey 128: sampled (sRGB->linear), composited, then re-encoded to sRGB
+    // at present must return ~128 — proving the linear-light texture path.
+    renderer.registerImage('grey', await solidImage(8, 128, 128, 128));
+    expect(renderer.hasImage('grey')).toBe(true);
+    renderer.setRenderList(items);
+    const rb = await renderer.readback();
+
+    const center = pixel(rb, 32, 32);
+    expect(near(center.r, 128)).toBe(true);
+    expect(near(center.g, 128)).toBe(true);
+    expect(near(center.b, 128)).toBe(true);
+    expect(center.a).toBe(255);
+
+    // Outside the image is the black background.
+    const outside = pixel(rb, 2, 2);
+    expect(Math.max(outside.r, outside.g, outside.b)).toBe(0);
+
+    renderer.destroy();
+  });
+
+  it('magnifies smoothly: a 2-row image becomes a gradient, not hard steps', async () => {
+    // 2x2 image, top row white, bottom row black. Magnified large, a correct
+    // (bicubic/bilinear) sampler yields a smooth vertical ramp with many
+    // intermediate greys; nearest-neighbour would give only 0 and 255.
+    const px = new Uint8ClampedArray([
+      255, 255, 255, 255, 255, 255, 255, 255, // row 0: white, white
+      0, 0, 0, 255, 0, 0, 0, 255, // row 1: black, black
+    ]);
+    const bitmap = await createImageBitmap(new ImageData(px, 2, 2));
+
+    const doc = SceneDocument.create({ idFactory: createSequentialIdFactory('n') });
+    doc.insert<ImageNode>({
+      type: 'image',
+      name: 'ramp',
+      size: vec2(48, 48),
+      assetId: 'ramp',
+      transform: createTransform({ translation: vec2(8, 8) }),
+    });
+    const renderer = await WebGpuRenderer.create(makeCanvas(64), {
+      colorSpace: 'srgb',
+      dither: false,
+    });
+    renderer.setClearColor({ r: 0, g: 0, b: 0, a: 1 });
+    renderer.registerImage('ramp', bitmap);
+    renderer.setRenderList(buildRenderList(doc, createCamera()));
+    const rb = await renderer.readback();
+
+    // Down the centre column, collect the distinct luminances inside the image.
+    const seen = new Set<number>();
+    for (let y = 10; y < 54; y++) {
+      seen.add(pixel(rb, 32, y).r);
+    }
+    const intermediates = [...seen].filter((v) => v > 8 && v < 247);
+    // A smooth ramp has many in-between values; nearest would have ~zero.
+    expect(intermediates.length).toBeGreaterThan(6);
+
+    renderer.destroy();
+  });
+
+  it('skips an image whose asset is not registered (draws background only)', async () => {
+    const doc = SceneDocument.create({ idFactory: createSequentialIdFactory('n') });
+    doc.insert<ImageNode>({
+      type: 'image',
+      name: 'img',
+      size: vec2(32, 32),
+      assetId: 'missing',
+      transform: createTransform({ translation: vec2(16, 16) }),
+    });
+    const renderer = await WebGpuRenderer.create(makeCanvas(64), {
+      colorSpace: 'srgb',
+      dither: false,
+    });
+    renderer.setClearColor({ r: 0, g: 0, b: 0, a: 1 });
+    expect(renderer.hasImage('missing')).toBe(false);
+    renderer.setRenderList(buildRenderList(doc, createCamera()));
+    const rb = await renderer.readback(); // must not throw
+
+    const center = pixel(rb, 32, 32);
+    expect(Math.max(center.r, center.g, center.b)).toBe(0);
+    renderer.destroy();
   });
 
   it('renders the sample scene at story scale (non-empty)', async () => {

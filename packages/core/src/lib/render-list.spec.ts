@@ -2,8 +2,8 @@ import { createCamera } from './camera';
 import { SceneDocument } from './document';
 import { createSequentialIdFactory } from './id';
 import { transformPoint } from './matrix';
-import type { GroupNode, LayerNode } from './node';
-import { buildRenderList, debugColorForId } from './render-list';
+import type { GroupNode, ImageNode, LayerNode } from './node';
+import { buildRenderList, debugColorForId, type QuadDrawItem } from './render-list';
 import { createTransform } from './transform';
 import { approxEquals, vec2 } from './vec2';
 
@@ -23,11 +23,43 @@ describe('buildRenderList', () => {
 
     const items = buildRenderList(doc, createCamera());
     expect(items).toHaveLength(1);
-    expect(items[0].nodeId).toBe(layer.id);
+    const item = items[0];
+    expect(item.nodeId).toBe(layer.id);
     // unit (0,0) -> local (0,0) -> world/screen (10,20); unit (1,1) -> (110,70).
-    expect(approxEquals(transformPoint(items[0].transform, vec2(0, 0)), vec2(10, 20))).toBe(true);
-    expect(approxEquals(transformPoint(items[0].transform, vec2(1, 1)), vec2(110, 70))).toBe(true);
-    expect(items[0].color).toEqual(debugColorForId(layer.id));
+    expect(approxEquals(transformPoint(item.transform, vec2(0, 0)), vec2(10, 20))).toBe(true);
+    expect(approxEquals(transformPoint(item.transform, vec2(1, 1)), vec2(110, 70))).toBe(true);
+    expect(item.kind).toBe('solid');
+    expect((item as QuadDrawItem).color).toEqual(debugColorForId(layer.id));
+  });
+
+  it('emits an image draw item carrying the asset reference and opacity', () => {
+    const doc = newDoc();
+    const image = doc.insert<ImageNode>({
+      type: 'image',
+      name: 'photo',
+      size: vec2(64, 48),
+      assetId: 'asset-42',
+      opacity: 0.5,
+      transform: createTransform({ translation: vec2(10, 20) }),
+    });
+    const items = buildRenderList(doc, createCamera());
+    expect(items).toHaveLength(1);
+    const item = items[0];
+    expect(item.kind).toBe('image');
+    if (item.kind !== 'image') throw new Error('expected image item');
+    expect(item.assetId).toBe('asset-42');
+    expect(item.opacity).toBe(0.5);
+    // Same unit-square -> screen mapping as any other leaf.
+    expect(approxEquals(transformPoint(item.transform, vec2(1, 1)), vec2(74, 68))).toBe(true);
+    expect(item.nodeId).toBe(image.id);
+  });
+
+  it('defaults image opacity to 1 when omitted', () => {
+    const doc = newDoc();
+    doc.insert<ImageNode>({ type: 'image', name: 'p', size: vec2(8, 8), assetId: 'a' });
+    const item = buildRenderList(doc, createCamera())[0];
+    if (item.kind !== 'image') throw new Error('expected image item');
+    expect(item.opacity).toBe(1);
   });
 
   it('applies the camera', () => {
