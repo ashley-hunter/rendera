@@ -22,6 +22,13 @@ export interface RendererColor {
 export interface WebGpuRendererOptions {
   colorSpace?: PredefinedColorSpace;
   dither?: boolean;
+  /**
+   * Supersampling factor: the scene is rendered into a target this many times
+   * larger than the display in each axis, then box-filtered down at present for
+   * anti-aliased edges. Default 2 (4 samples/px). Clamped down only if the
+   * target would exceed the device's `maxTextureDimension2D`.
+   */
+  supersample?: number;
 }
 
 export interface ReadbackResult {
@@ -60,7 +67,7 @@ struct VOut { @builtin(position) pos : vec4f, @location(0) color : vec4f };
 
 const PRESENT_SHADER = /* wgsl */ `
 @group(0) @binding(0) var sceneTex : texture_2d<f32>;
-struct Params { dither : f32, _p0 : f32, _p1 : f32, _p2 : f32 };
+struct Params { dither : f32, scale : f32, _p1 : f32, _p2 : f32 };
 @group(0) @binding(1) var<uniform> params : Params;
 
 @vertex fn vs(@builtin(vertex_index) i : u32) -> @builtin(position) vec4f {
@@ -79,8 +86,18 @@ fn hash(p : vec2f) -> f32 {
 }
 
 @fragment fn fs(@builtin(position) frag : vec4f) -> @location(0) vec4f {
-  let coord = vec2i(frag.xy);
-  let lin = textureLoad(sceneTex, coord, 0);
+  // Box-filter the supersampled scene down to this display pixel. The scene is
+  // linear-light premultiplied, so a plain average is the correct resolve;
+  // the sRGB encode and dither happen once, afterwards.
+  let s = max(1, i32(params.scale));
+  let base = vec2i(frag.xy) * s;
+  var acc = vec4f(0.0);
+  for (var dy = 0; dy < s; dy = dy + 1) {
+    for (var dx = 0; dx < s; dx = dx + 1) {
+      acc = acc + textureLoad(sceneTex, base + vec2i(dx, dy), 0);
+    }
+  }
+  let lin = acc / f32(s * s);
   var rgb = vec3f(linear_to_srgb(lin.r), linear_to_srgb(lin.g), linear_to_srgb(lin.b));
   let d = (hash(frag.xy) - 0.5) / 255.0 * params.dither;
   rgb = rgb + vec3f(d);
@@ -94,6 +111,11 @@ export class WebGpuRenderer {
   private background: RendererColor = { r: 0, g: 0, b: 0, a: 1 };
   private width: number;
   private height: number;
+  /** Requested supersample factor; the effective one may be clamped by limits. */
+  private readonly supersample: number;
+  /** Effective (clamped) supersample factor actually in use. */
+  private sampleScale = 1;
+  private ditherEnabled = false;
   private sceneTarget: GPUTexture;
   private presentBindGroup: GPUBindGroup;
 
@@ -114,13 +136,21 @@ export class WebGpuRenderer {
     private readonly viewportBuffer: GPUBuffer,
     private readonly unitQuadBuffer: GPUBuffer,
     width: number,
-    height: number
+    height: number,
+    supersample: number
   ) {
     this.width = width;
     this.height = height;
+    this.supersample = Math.max(1, Math.floor(supersample));
     this.sceneTarget = this.createSceneTarget();
     this.presentBindGroup = this.createPresentBindGroup();
     this.updateViewport();
+    this.writeParams();
+  }
+
+  /** The effective supersample factor in use (may be clamped below the request). */
+  get scale(): number {
+    return this.sampleScale;
   }
 
   static async create(
@@ -238,7 +268,8 @@ export class WebGpuRenderer {
       viewportBuffer,
       unitQuadBuffer,
       width,
-      height
+      height,
+      options.supersample ?? 2
     );
     renderer.setDither(options.dither ?? true);
     return renderer;
@@ -250,11 +281,8 @@ export class WebGpuRenderer {
   }
 
   setDither(enabled: boolean): void {
-    this.device.queue.writeBuffer(
-      this.paramsBuffer,
-      0,
-      new Float32Array([enabled ? 1 : 0, 0, 0, 0])
-    );
+    this.ditherEnabled = enabled;
+    this.writeParams();
   }
 
   /** Upload the quads to draw (screen-space transform + linear colour each). */
@@ -296,6 +324,7 @@ export class WebGpuRenderer {
     this.sceneTarget = this.createSceneTarget();
     this.presentBindGroup = this.createPresentBindGroup();
     this.updateViewport();
+    this.writeParams();
   }
 
   render(): void {
@@ -380,6 +409,9 @@ export class WebGpuRenderer {
   }
 
   private updateViewport(): void {
+    // Viewport stays at *display* resolution: clip space is resolution-
+    // independent, so the render list rasterizes into the larger (supersampled)
+    // scene target at higher density without any change to its coordinates.
     this.device.queue.writeBuffer(
       this.viewportBuffer,
       0,
@@ -387,9 +419,28 @@ export class WebGpuRenderer {
     );
   }
 
+  private writeParams(): void {
+    this.device.queue.writeBuffer(
+      this.paramsBuffer,
+      0,
+      new Float32Array([this.ditherEnabled ? 1 : 0, this.sampleScale, 0, 0])
+    );
+  }
+
+  /** The supersample factor that fits within the device's texture-size limit. */
+  private computeScale(): number {
+    const max = this.device.limits.maxTextureDimension2D;
+    let scale = this.supersample;
+    while (scale > 1 && (this.width * scale > max || this.height * scale > max)) {
+      scale -= 1;
+    }
+    return scale;
+  }
+
   private createSceneTarget(): GPUTexture {
+    this.sampleScale = this.computeScale();
     return this.device.createTexture({
-      size: [this.width, this.height],
+      size: [this.width * this.sampleScale, this.height * this.sampleScale],
       format: SCENE_FORMAT,
       usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING,
     });

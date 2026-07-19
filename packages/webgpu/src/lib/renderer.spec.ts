@@ -110,6 +110,68 @@ describe('WebGpuRenderer colour pipeline', () => {
     renderer.destroy();
   });
 
+  it('supersamples: a rotated edge gets partial-coverage pixels that 1x lacks', async () => {
+    // A rotated quad on a black background. With no supersampling every pixel is
+    // fully inside or outside the quad (binary edge). With 2x supersampling the
+    // edge pixels get fractional coverage -> intermediate luminance. Dither is
+    // off so the only source of in-between values is the box-filtered edge.
+    const doc = SceneDocument.create({ idFactory: createSequentialIdFactory('n') });
+    const layer = doc.insert<LayerNode>({
+      type: 'layer',
+      name: 'r',
+      size: vec2(28, 28),
+      transform: createTransform({ translation: vec2(32, 32), rotation: 0.4 }),
+    });
+    const items = buildRenderList(doc, createCamera());
+    const item = items.find((i) => i.nodeId === layer.id);
+    if (!item) {
+      throw new Error('no quad for layer');
+    }
+    const quadMax = encode8(
+      linearToSrgb(Math.max(item.color.r, item.color.g, item.color.b))
+    );
+
+    // Count edge pixels whose brightest channel is strictly between the
+    // background (0) and the solid quad colour.
+    const countPartial = (rb: ReadbackResult): number => {
+      let n = 0;
+      for (let i = 0; i < rb.data.length; i += 4) {
+        const m = Math.max(rb.data[i], rb.data[i + 1], rb.data[i + 2]);
+        if (m > 4 && m < quadMax - 4) {
+          n++;
+        }
+      }
+      return n;
+    };
+
+    const aliased = await WebGpuRenderer.create(makeCanvas(64), {
+      colorSpace: 'srgb',
+      dither: false,
+      supersample: 1,
+    });
+    aliased.setClearColor({ r: 0, g: 0, b: 0, a: 1 });
+    aliased.setRenderList(items);
+    const partial1 = countPartial(await aliased.readback());
+    expect(aliased.scale).toBe(1);
+    aliased.destroy();
+
+    const smooth = await WebGpuRenderer.create(makeCanvas(64), {
+      colorSpace: 'srgb',
+      dither: false,
+      supersample: 2,
+    });
+    smooth.setClearColor({ r: 0, g: 0, b: 0, a: 1 });
+    smooth.setRenderList(items);
+    const partial2 = countPartial(await smooth.readback());
+    expect(smooth.scale).toBe(2);
+    smooth.destroy();
+
+    // 1x has (near) no in-between pixels; 2x has a smooth, partially-covered edge.
+    expect(partial1).toBeLessThanOrEqual(2);
+    expect(partial2).toBeGreaterThan(partial1);
+    expect(partial2).toBeGreaterThan(10);
+  });
+
   it('renders the sample scene at story scale (non-empty)', async () => {
     const doc = SceneDocument.create({ idFactory: createSequentialIdFactory('n') });
     const g = doc.insert<GroupNode>({

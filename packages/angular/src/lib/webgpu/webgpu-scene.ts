@@ -72,7 +72,10 @@ export class WebGpuScene {
     }
     this.sizeCanvas(canvas);
     try {
-      this.renderer = await WebGpuRenderer.create(canvas, { colorSpace: 'srgb' });
+      this.renderer = await WebGpuRenderer.create(canvas, {
+        colorSpace: 'srgb',
+        supersample: 2,
+      });
       this.renderer.setClearColor({ r: 0.02, g: 0.02, b: 0.03, a: 1 });
       this.renderState.set('ready');
       if (typeof ResizeObserver !== 'undefined') {
