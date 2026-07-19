@@ -40,8 +40,10 @@ The authoritative model and all the math, fully unit-tested without a canvas.
 - ✅ **Spatial model:** `SpatialNode` carries a transform; world-matrix
   composition, world bounds (leaf rect / container union), and geometric
   hit-testing (top-most, z-ordered) via util-owned local geometry.
-- ⬜ **Camera & coordinate spaces:** screen/world/local; `screenToWorld` /
-  `worldToScreen` / viewport bounds (DPR deferred to the backend).
+- ✅ **Camera & coordinate spaces:** origin-anchored pan/zoom/rotation camera;
+  `worldToScreen`/`screenToWorld` + matrices, visible-world-bounds, and the
+  anchored ops `panBy`/`zoomAround`/`rotateAround`/`fitBounds`. (DPR deferred to
+  the backend.)
 - ⬜ **Selection, spatial index, input (`PointerInput`) + tools.**
 - **Camera & coordinate spaces:** screen/world/local; `screenToWorld` /
   `worldToScreen` / viewport bounds (DPR deferred to the backend).

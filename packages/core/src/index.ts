@@ -17,6 +17,7 @@ export * from './lib/history';
 export * from './lib/vec2';
 export * from './lib/transform';
 export * from './lib/bounds';
+export * from './lib/camera';
 export {
   IDENTITY,
   mat2d,
