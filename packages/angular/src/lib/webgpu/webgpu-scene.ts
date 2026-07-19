@@ -3,6 +3,7 @@ import {
   ChangeDetectionStrategy,
   Component,
   ElementRef,
+  input,
   signal,
   viewChild,
 } from '@angular/core';
@@ -16,6 +17,7 @@ import {
   withPixelRatio,
   zoomAround,
   type Camera,
+  type SceneDocument,
   type Vec2,
   type ViewportGestureChange,
 } from '@rendera/core';
@@ -24,12 +26,32 @@ import { createSampleDocument } from '../sample-scene';
 
 type Status = 'pending' | 'ready' | 'unsupported';
 
+/** A linear-light clear colour. */
+interface ClearColor {
+  r: number;
+  g: number;
+  b: number;
+  a: number;
+}
+
 /**
- * A GPU-rendered showcase of the shared sample document via `@rendera/webgpu`,
- * with drag-pan and wheel-zoom. Device init is async, and the component
- * degrades gracefully when WebGPU is unavailable (ADR 0002). This is the first
- * on-screen GPU path; the Canvas2D `SceneInspector` remains the always-works
- * debug view.
+ * What to render: a document, an optional initial camera and clear colour, and
+ * an async `setup` hook that runs once after the device is ready (e.g. to
+ * register image assets on the renderer before the first draw).
+ */
+export interface SceneSource {
+  readonly document: SceneDocument;
+  readonly camera?: Camera;
+  readonly clearColor?: ClearColor;
+  setup?(renderer: WebGpuRenderer): void | Promise<void>;
+}
+
+/**
+ * A GPU-rendered showcase via `@rendera/webgpu`, with drag-pan, wheel-zoom, and
+ * two-finger pinch. Renders the shared sample document by default, or any
+ * `SceneSource` passed via the `scene` input. Device init is async and the
+ * component degrades gracefully when WebGPU is unavailable (ADR 0002); the
+ * Canvas2D `SceneInspector` remains the always-works debug view.
  */
 @Component({
   selector: 'rendera-webgpu-scene',
@@ -42,7 +64,10 @@ export class WebGpuScene {
   private readonly canvasRef =
     viewChild<ElementRef<HTMLCanvasElement>>('canvas');
 
-  private readonly document = createSampleDocument();
+  /** Optional scene to render; defaults to the shared sample document. */
+  readonly scene = input<SceneSource | null>(null);
+
+  private document: SceneDocument = createSampleDocument();
   private readonly camera = signal<Camera>(createCamera({ pan: vec2(20, 20) }));
   private renderer: WebGpuRenderer | null = null;
   private resizeObserver?: ResizeObserver;
@@ -70,19 +95,33 @@ export class WebGpuScene {
       this.fail('No canvas element.');
       return;
     }
+    const source = this.scene();
+    if (source) {
+      this.document = source.document;
+      if (source.camera) {
+        this.camera.set(source.camera);
+      }
+    }
     this.sizeCanvas(canvas);
     try {
       this.renderer = await WebGpuRenderer.create(canvas, {
         colorSpace: 'srgb',
         supersample: 2,
       });
-      this.renderer.setClearColor({ r: 0.02, g: 0.02, b: 0.03, a: 1 });
+      this.renderer.setClearColor(source?.clearColor ?? { r: 0.02, g: 0.02, b: 0.03, a: 1 });
+      // Register image assets (etc.) before the first draw.
+      await source?.setup?.(this.renderer);
       this.renderState.set('ready');
       if (typeof ResizeObserver !== 'undefined') {
         this.resizeObserver = new ResizeObserver(() => this.onResize());
         this.resizeObserver.observe(canvas);
       }
-      this.draw();
+      // A source without an explicit camera is framed to fit its content.
+      if (source && !source.camera) {
+        this.fit();
+      } else {
+        this.draw();
+      }
     } catch (error) {
       this.fail(error instanceof Error ? error.message : String(error));
     }
