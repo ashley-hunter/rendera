@@ -30,7 +30,7 @@ import {
   transformPoint,
   transformVector,
 } from './matrix';
-import { add, subtract, type Vec2, vec2, ZERO } from './vec2';
+import { add, scale, subtract, type Vec2, vec2, ZERO } from './vec2';
 
 export interface Camera {
   /** Screen position (logical px) of the world origin. */
@@ -96,6 +96,23 @@ export function visibleWorldBounds(camera: Camera, viewport: Viewport): Bounds {
 /** Translate the view by a screen-space delta. */
 export function panBy(camera: Camera, screenDelta: Vec2): Camera {
   return { ...camera, pan: add(camera.pan, screenDelta) };
+}
+
+/**
+ * A camera whose screen output is uniformly scaled by `pixelRatio`, i.e. one
+ * that maps world → *device* pixels instead of logical (CSS) pixels:
+ * `worldToScreen(withPixelRatio(cam, k), p) === k · worldToScreen(cam, p)`.
+ *
+ * DPR is deliberately not part of `Camera` (ADR 0004) — the camera stays in
+ * logical space for input and hit-testing, and the backend derives the device
+ * camera at the render seam so it can rasterize at full physical resolution.
+ */
+export function withPixelRatio(camera: Camera, pixelRatio: number): Camera {
+  return {
+    pan: scale(camera.pan, pixelRatio),
+    zoom: camera.zoom * pixelRatio,
+    rotation: camera.rotation,
+  };
 }
 
 /** The pan that places `world` at `screen` for a given zoom and rotation. */

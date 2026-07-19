@@ -7,10 +7,11 @@ import {
   rotateAround,
   screenToWorld,
   visibleWorldBounds,
+  withPixelRatio,
   worldToScreen,
   zoomAround,
 } from './camera';
-import { approxEquals as vecApproxEquals, vec2 } from './vec2';
+import { approxEquals as vecApproxEquals, scale as scaleVec, vec2 } from './vec2';
 
 describe('createCamera', () => {
   it('defaults to identity', () => {
@@ -59,6 +60,23 @@ describe('panBy', () => {
   it('shifts the pan by a screen delta', () => {
     const cam = createCamera({ pan: vec2(10, 20), zoom: 3 });
     expect(panBy(cam, vec2(5, -5))).toEqual({ pan: vec2(15, 15), zoom: 3, rotation: 0 });
+  });
+});
+
+describe('withPixelRatio', () => {
+  it('scales screen output by the pixel ratio (world -> device px)', () => {
+    const cam = createCamera({ pan: vec2(40, 10), zoom: 1.5, rotation: 0.7 });
+    const p = vec2(23, -8);
+    const device = withPixelRatio(cam, 2);
+    expect(vecApproxEquals(worldToScreen(device, p), scaleVec(worldToScreen(cam, p), 2))).toBe(true);
+    // Rotation is unchanged; pan and zoom scale.
+    expect(device.rotation).toBe(cam.rotation);
+    expect(device.zoom).toBeCloseTo(3, 9);
+  });
+
+  it('is identity at ratio 1', () => {
+    const cam = createCamera({ pan: vec2(7, -3), zoom: 2.25, rotation: 0.2 });
+    expect(withPixelRatio(cam, 1)).toEqual(cam);
   });
 });
 

@@ -13,6 +13,7 @@ import {
   panBy,
   vec2,
   ViewportGesture,
+  withPixelRatio,
   zoomAround,
   type Camera,
   type Vec2,
@@ -96,9 +97,10 @@ export class WebGpuScene {
     if (!canvas || !bounds) {
       return;
     }
-    this.camera.set(
-      fitBounds(bounds, { width: canvas.width, height: canvas.height }, 24)
-    );
+    // The camera is logical, so fit to the CSS (logical) viewport, not the
+    // device-pixel backing store.
+    const rect = canvas.getBoundingClientRect();
+    this.camera.set(fitBounds(bounds, { width: rect.width, height: rect.height }, 24));
     this.draw();
   }
 
@@ -165,10 +167,21 @@ export class WebGpuScene {
     this.draw();
   }
 
+  /** Current device-pixel ratio (physical px per CSS px). */
+  private pixelRatio(): number {
+    return globalThis.devicePixelRatio || 1;
+  }
+
+  /**
+   * Size the canvas *backing store* to physical device pixels so the GPU
+   * rasterizes at full resolution (crisp on HiDPI / mobile). CSS keeps the
+   * element at its logical size, so the browser never upscales the render.
+   */
   private sizeCanvas(canvas: HTMLCanvasElement): void {
+    const dpr = this.pixelRatio();
     const rect = canvas.getBoundingClientRect();
-    canvas.width = Math.max(1, Math.round(rect.width));
-    canvas.height = Math.max(1, Math.round(rect.height));
+    canvas.width = Math.max(1, Math.round(rect.width * dpr));
+    canvas.height = Math.max(1, Math.round(rect.height * dpr));
   }
 
   /**
@@ -191,7 +204,10 @@ export class WebGpuScene {
     if (!this.renderer) {
       return;
     }
-    this.renderer.setRenderList(buildRenderList(this.document, this.camera()));
+    // Build the render list in device pixels (logical camera scaled by DPR) so
+    // geometry lands on the full-resolution backing store.
+    const camera = withPixelRatio(this.camera(), this.pixelRatio());
+    this.renderer.setRenderList(buildRenderList(this.document, camera));
     this.renderer.render();
   }
 }
