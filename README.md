@@ -31,7 +31,7 @@ Libraries live under `packages/` in the `@rendera/*` scope:
 | --- | --- |
 | `@rendera/core` | Framework-agnostic engine kernel (document model, math, history, input, renderer interface). No DOM/GPU. |
 | `@rendera/angular` | Thin Angular wrapper that mounts the engine and adapts input/state. |
-| `@rendera/webgpu` *(planned)* | WebGPU rendering backend implementing the core's renderer interface. |
+| `@rendera/webgpu` | WebGPU rendering backend (device + colour-correct present so far). Tested against a real device via headless Chromium + SwiftShader. |
 
 Feature libraries (`raster`, `vector`, `effects`, `animation`, `io`) are added
 as those areas are built.

@@ -16,7 +16,8 @@
     "strict": false,
     "paths": {
       "@rendera/core": ["./packages/core/src/index.ts"],
-      "@rendera/angular": ["./packages/angular/src/index.ts"]
+      "@rendera/angular": ["./packages/angular/src/index.ts"],
+      "@rendera/webgpu": ["./packages/webgpu/src/index.ts"]
     }
   },
   "exclude": ["node_modules", "tmp"]

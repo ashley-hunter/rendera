@@ -99,6 +99,9 @@ importers:
       '@vitest/coverage-v8':
         specifier: ~4.1.0
         version: 4.1.10(@vitest/browser@4.1.10)(vitest@4.1.10)
+      '@webgpu/types':
+        specifier: ^0.1.71
+        version: 0.1.71
       angular-eslint:
         specifier: ^22.0.0
         version: 22.1.0(@angular/cli@22.0.7(@types/node@22.20.1)(chokidar@5.0.0))(chokidar@5.0.0)(eslint@9.39.5(jiti@2.4.2))(typescript-eslint@8.64.0(eslint@9.39.5(jiti@2.4.2))(typescript@6.0.3))(typescript@6.0.3)
@@ -3620,6 +3623,9 @@ packages:
 
   '@webcontainer/env@1.1.1':
     resolution: {integrity: sha512-6aN99yL695Hi9SuIk1oC88l9o0gmxL1nGWWQ/kNy81HigJ0FoaoTXpytCj6ItzgyCEwA9kF1wixsTuv5cjsgng==}
+
+  '@webgpu/types@0.1.71':
+    resolution: {integrity: sha512-mMy8/ODcKhab808co15eW+yN+HgXoQxRQHTiBV9Mrvl1r0ufnid7YOcI+gi4eUWSWl9ezD6TW2KXccrL8HCh2A==}
 
   '@xtuc/ieee754@1.2.0':
     resolution: {integrity: sha512-DX8nKgqcGwsc0eJSqYt5lwP4DH5FlHnmuWWBRy7X0NcaGR0ZtuyeESgMwTYVEtxmsNGY+qit4QYT/MIYTOTPeA==}
@@ -11789,6 +11795,8 @@ snapshots:
       '@xtuc/long': 4.2.2
 
   '@webcontainer/env@1.1.1': {}
+
+  '@webgpu/types@0.1.71': {}
 
   '@xtuc/ieee754@1.2.0': {}
 

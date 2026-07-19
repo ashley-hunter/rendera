@@ -59,22 +59,26 @@ The authoritative model and all the math, fully unit-tested without a canvas.
 - ⬜ **Renderer interface (the seam):** deferred to Phase 2, designed against the
   WebGPU backend's real requirements rather than the inspector.
 
-## Phase 2 — WebGPU compositor & colour pipeline (first pixels)  ⬜  → `@rendera/webgpu`
+## Phase 2 — WebGPU compositor & colour pipeline (first pixels)  🔨  → `@rendera/webgpu`
 
 The heart of the quality bar. This is the minimal-raster proof from ADR 0001.
+Tested against a real device: headless Chromium runs WebGPU via **SwiftShader**,
+so backend tests do **pixel readback** to assert colour correctness.
 
-- **Device/context:** capability detection (Display-P3, texture-format tiers,
-  `maxTextureDimension2D`, subgroups); preferred format; premultiplied alpha;
-  Display-P3 canvas with sRGB fallback. (ADR 0002, 0003)
-- **Tiled compositor:** `rgba16float` linear-premultiplied tiles; layer-stack
-  traversal; opacity; Porter–Duff `over`; dirty-tile invalidation; static vs
-  interactive surface split.
-- **Colour pipeline:** decode-to-linear-P3 on import; present pass = encode once
-  + **blue-noise dither**; correct sRGB/P3 output. (ADR 0003)
-- **Raster image layer** (tiled) + **pan/zoom/rotate viewport**: bicubic on
-  magnify, trilinear-mip + anisotropic on minify (mips built linear-premultiplied).
-- **Showcase:** a crisp image on a pannable/zoomable/rotatable canvas — the first
-  visible quality bar, on desktop and mobile.
+- ✅ **Device + colour-correct present:** device/adapter acquisition; canvas
+  config (preferred format, premultiplied, Display-P3 colour space); an
+  `rgba16float` linear scene target cleared to a linear colour and encoded to the
+  display (sRGB transfer, shared by P3) with toggleable dither. A readback test
+  asserts linear 0.5 → ~188/255. (ADR 0002, 0003)
+- ⬜ **Fuller capability detection:** texture-format tiers, `maxTextureDimension2D`,
+  subgroups; sRGB-canvas fallback path; wide-gamut primary matrices for coloured
+  content.
+- ⬜ **Blue-noise dither** (currently a hash-based placeholder).
+- ⬜ **Scene quads through the camera** → then a **tiled compositor**
+  (`rgba16float` premultiplied tiles; opacity; Porter–Duff `over`; dirty tiles).
+- ⬜ **Raster image layer** (tiled) + **pan/zoom/rotate viewport**: bicubic on
+  magnify, trilinear-mip + anisotropic on minify.
+- ⬜ **Showcase:** a crisp image on a pannable/zoomable/rotatable canvas.
 
 ## Phase 3 — Raster rendering & brush primitives  ⬜  → `@rendera/raster`
 

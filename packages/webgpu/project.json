@@ -1,0 +1,9 @@
+{
+  "name": "webgpu",
+  "$schema": "../../node_modules/nx/schemas/project-schema.json",
+  "sourceRoot": "packages/webgpu/src",
+  "projectType": "library",
+  "tags": ["scope:webgpu", "type:lib", "layer:renderer"],
+  "// targets": "to see all targets run: nx show project webgpu --web",
+  "targets": {}
+}
