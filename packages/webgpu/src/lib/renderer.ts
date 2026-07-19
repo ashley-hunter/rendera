@@ -45,11 +45,13 @@ interface PathResources {
   viewportBindGroup: GPUBindGroup;
 }
 
-/** Per-path-draw packing: where its edges sit and its params slot. */
+/** Per-path-draw packing: its params slot and row-band table location. */
 interface PathDraw {
-  edgeOffset: number;
-  edgeCount: number;
   slot: number;
+  bandTableOffset: number;
+  bandCount: number;
+  bandMinY: number;
+  bandH: number;
 }
 
 /** A layer target on the compositing stack, with the group's compositing props. */
@@ -348,6 +350,11 @@ struct Edge { a : vec2f, b : vec2f, c : vec2f, kind : vec2f };
 @group(1) @binding(0) var<storage, read> edges : array<Edge>;
 struct PathParams { color : vec4f, bbox : vec4f, counts : vec4u, misc : vec4f };
 @group(1) @binding(1) var<uniform> pp : PathParams;
+// Row-band acceleration: bandTable[bandTableOffset + row] = (indexOffset, count)
+// into edgeIndex, which lists the edges whose y-range touches that horizontal
+// band. A pixel only tests its own band's edges.
+@group(1) @binding(2) var<storage, read> bandTable : array<vec2u>;
+@group(1) @binding(3) var<storage, read> edgeIndex : array<u32>;
 
 @vertex fn vs(@location(0) corner : vec2f) -> @builtin(position) vec4f {
   let pad = 2.0; // device px, so the AA rim is never clipped by the bbox quad
@@ -439,15 +446,19 @@ fn windQuad(p : vec2f, A : vec2f, B : vec2f, C : vec2f) -> i32 {
 
 @fragment fn fs(@builtin(position) frag : vec4f) -> @location(0) vec4f {
   let p = frag.xy / vp.scale; // target px -> device px (edge space)
-  let offset = pp.counts.x;
-  let count = pp.counts.y;
+  // Pick this pixel's horizontal band and iterate only its edges.
+  let bandCount = i32(pp.counts.z);
+  var row = i32(floor((p.y - pp.misc.y) / pp.misc.z));
+  row = clamp(row, 0, bandCount - 1);
+  let entry = bandTable[pp.counts.y + u32(row)];
+  let idxOffset = entry.x;
+  let cnt = entry.y;
   var winding = 0;
   var dist = 1e9;
-  for (var i = 0u; i < count; i = i + 1u) {
-    let e = edges[offset + i];
-    // Winding always (cheap, and every edge on the scanline matters); the exact
-    // distance (expensive SDF) only matters near the boundary, so skip it for
-    // edges whose bbox is comfortably far from this pixel.
+  for (var j = 0u; j < cnt; j = j + 1u) {
+    let e = edges[edgeIndex[idxOffset + j]];
+    // Winding always (cheap); the exact distance SDF only matters near the
+    // boundary, so skip it for edges whose bbox is far from this pixel.
     let lo = min(min(e.a, e.b), e.c) - vec2f(2.0);
     let hi = max(max(e.a, e.b), e.c) + vec2f(2.0);
     let near = p.x >= lo.x && p.x <= hi.x && p.y >= lo.y && p.y <= hi.y;
@@ -460,7 +471,7 @@ fn windQuad(p : vec2f, A : vec2f, B : vec2f, C : vec2f) -> i32 {
     }
   }
   var inside = winding != 0;
-  if (pp.counts.z == 1u) { inside = (winding & 1) != 0; }
+  if (pp.counts.x == 1u) { inside = (winding & 1) != 0; }
   let signed = select(dist, -dist, inside);
   let coverage = clamp(0.5 - signed, 0.0, 1.0); // ~1 device-px analytic rim
   let alpha = pp.color.a * pp.misc.x * coverage;
@@ -498,8 +509,10 @@ export class WebGpuRenderer {
   private readonly targetPool: GPUTexture[] = [];
   private targetFree: GPUTexture[] = [];
 
-  /** Vector-fill state: edge storage, per-draw params, and packing records. */
+  /** Vector-fill state: edge storage, row-band tables, per-draw params. */
   private edgeBuffer: GPUBuffer | null = null;
+  private bandTableBuffer: GPUBuffer | null = null;
+  private edgeIndexBuffer: GPUBuffer | null = null;
   private pathParamsBuffer: GPUBuffer;
   private pathParamsSlots = 0;
   private pathDraws: PathDraw[] = [];
@@ -792,6 +805,8 @@ export class WebGpuRenderer {
       entries: [
         { binding: 0, visibility: GPUShaderStage.FRAGMENT, buffer: { type: 'read-only-storage' } },
         { binding: 1, visibility: GPUShaderStage.VERTEX | GPUShaderStage.FRAGMENT, buffer: { type: 'uniform' } },
+        { binding: 2, visibility: GPUShaderStage.FRAGMENT, buffer: { type: 'read-only-storage' } },
+        { binding: 3, visibility: GPUShaderStage.FRAGMENT, buffer: { type: 'read-only-storage' } },
       ],
     });
     const pathPipeline = device.createRenderPipeline({
@@ -947,7 +962,11 @@ export class WebGpuRenderer {
     const solids: number[] = [];
     const images: number[] = [];
     const edges: number[] = [];
+    const bandTable: number[] = []; // (indexOffset, count) pairs
+    const edgeIndex: number[] = []; // global edge indices, grouped by band
     this.pathDraws = [];
+    const bandHeight = 8; // device px per horizontal band
+    const pad = 2; // AA margin, matching the vertex bbox pad
     let blendOps = 0;
     for (const cmd of commands) {
       if (cmd.op === 'draw-solid') {
@@ -960,11 +979,38 @@ export class WebGpuRenderer {
         images.push(m.a, m.b, m.c, m.d, m.e, m.f, cmd.opacity, 0);
         if (cmd.blend !== 'normal') blendOps++;
       } else if (cmd.op === 'draw-path') {
-        const edgeOffset = edges.length / 8;
+        const edgeBase = edges.length / 8;
         for (const e of cmd.edges) {
           edges.push(e.a.x, e.a.y, e.b.x, e.b.y, e.c.x, e.c.y, e.quad ? 1 : 0, 0);
         }
-        this.pathDraws.push({ edgeOffset, edgeCount: cmd.edges.length, slot: this.pathDraws.length });
+        // Bin edges into horizontal bands over the (padded) screen bbox.
+        const minY = cmd.bounds.minY - pad;
+        const maxY = cmd.bounds.maxY + pad;
+        const bandCount = Math.max(1, Math.ceil((maxY - minY) / bandHeight));
+        const buckets: number[][] = Array.from({ length: bandCount }, () => []);
+        cmd.edges.forEach((e, i) => {
+          const ey0 = Math.min(e.a.y, e.b.y, e.c.y) - pad;
+          const ey1 = Math.max(e.a.y, e.b.y, e.c.y) + pad;
+          const b0 = Math.min(bandCount - 1, Math.max(0, Math.floor((ey0 - minY) / bandHeight)));
+          const b1 = Math.min(bandCount - 1, Math.max(0, Math.floor((ey1 - minY) / bandHeight)));
+          for (let b = b0; b <= b1; b++) {
+            buckets[b].push(edgeBase + i);
+          }
+        });
+        const bandTableOffset = bandTable.length / 2;
+        for (let b = 0; b < bandCount; b++) {
+          bandTable.push(edgeIndex.length, buckets[b].length);
+          for (const gi of buckets[b]) {
+            edgeIndex.push(gi);
+          }
+        }
+        this.pathDraws.push({
+          slot: this.pathDraws.length,
+          bandTableOffset,
+          bandCount,
+          bandMinY: minY,
+          bandH: bandHeight,
+        });
         if (cmd.blend !== 'normal') blendOps++;
       } else if (cmd.op === 'push-group') {
         blendOps++; // the matching pop composites the group (one blend pass)
@@ -984,9 +1030,15 @@ export class WebGpuRenderer {
       this.device.queue.writeBuffer(this.imageBuffer, 0, data);
     }
     if (edges.length > 0) {
-      const data = new Float32Array(edges);
-      this.edgeBuffer = this.ensureStorageBuffer(this.edgeBuffer, data.byteLength);
-      this.device.queue.writeBuffer(this.edgeBuffer, 0, data);
+      const edgeData = new Float32Array(edges);
+      this.edgeBuffer = this.ensureStorageBuffer(this.edgeBuffer, edgeData.byteLength, 'path-edges');
+      this.device.queue.writeBuffer(this.edgeBuffer, 0, edgeData);
+      const tableData = new Uint32Array(bandTable);
+      this.bandTableBuffer = this.ensureStorageBuffer(this.bandTableBuffer, tableData.byteLength, 'path-bands');
+      this.device.queue.writeBuffer(this.bandTableBuffer, 0, tableData);
+      const indexData = new Uint32Array(edgeIndex);
+      this.edgeIndexBuffer = this.ensureStorageBuffer(this.edgeIndexBuffer, indexData.byteLength, 'path-edge-index');
+      this.device.queue.writeBuffer(this.edgeIndexBuffer, 0, indexData);
       this.packPathParams(commands);
     }
     this.ensureBlendParams(blendOps);
@@ -1013,23 +1065,27 @@ export class WebGpuRenderer {
       f32[o + 5] = cmd.bounds.minY;
       f32[o + 6] = cmd.bounds.maxX;
       f32[o + 7] = cmd.bounds.maxY;
-      u32[o + 8] = rec.edgeOffset;
-      u32[o + 9] = rec.edgeCount;
-      u32[o + 10] = cmd.fillRule === 'evenodd' ? 1 : 0;
-      f32[o + 12] = cmd.opacity; // misc.x
+      // counts = (fillRule, bandTableOffset, bandCount, _)
+      u32[o + 8] = cmd.fillRule === 'evenodd' ? 1 : 0;
+      u32[o + 9] = rec.bandTableOffset;
+      u32[o + 10] = rec.bandCount;
+      // misc = (opacity, bandMinY, bandH, _)
+      f32[o + 12] = cmd.opacity;
+      f32[o + 13] = rec.bandMinY;
+      f32[o + 14] = rec.bandH;
       draw++;
     }
     this.device.queue.writeBuffer(this.pathParamsBuffer, 0, buf);
   }
 
-  private ensureStorageBuffer(existing: GPUBuffer | null, byteLength: number): GPUBuffer {
+  private ensureStorageBuffer(existing: GPUBuffer | null, byteLength: number, label: string): GPUBuffer {
     if (existing && existing.size >= byteLength) {
       return existing;
     }
     existing?.destroy();
     return this.device.createBuffer({
-      label: 'path-edges',
-      size: byteLength,
+      label,
+      size: Math.max(16, byteLength),
       usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
     });
   }
@@ -1128,6 +1184,8 @@ export class WebGpuRenderer {
     this.blendParamsBuffer.destroy();
     this.pathParamsBuffer.destroy();
     this.edgeBuffer?.destroy();
+    this.bandTableBuffer?.destroy();
+    this.edgeIndexBuffer?.destroy();
     this.solidBuffer?.destroy();
     this.imageBuffer?.destroy();
     this.destroyTargetPool();
@@ -1236,7 +1294,7 @@ export class WebGpuRenderer {
       return;
     }
     if (cmd.op === 'draw-path') {
-      if (!this.edgeBuffer) {
+      if (!this.edgeBuffer || !this.bandTableBuffer || !this.edgeIndexBuffer) {
         return;
       }
       const bindGroup = this.device.createBindGroup({
@@ -1244,6 +1302,8 @@ export class WebGpuRenderer {
         entries: [
           { binding: 0, resource: { buffer: this.edgeBuffer } },
           { binding: 1, resource: { buffer: this.pathParamsBuffer, offset: index * 256, size: 64 } },
+          { binding: 2, resource: { buffer: this.bandTableBuffer } },
+          { binding: 3, resource: { buffer: this.edgeIndexBuffer } },
         ],
       });
       const pass = encoder.beginRenderPass({
