@@ -11,3 +11,25 @@ export * from './lib/registry';
 export * from './lib/changes';
 export * from './lib/document';
 export * from './lib/history';
+
+// Transform math. `matrix` also defines `approxEquals`; it is re-exported here
+// as `matrixApproxEquals` to avoid clashing with the vec2 version.
+export * from './lib/vec2';
+export * from './lib/transform';
+export * from './lib/bounds';
+export {
+  IDENTITY,
+  mat2d,
+  fromTranslation,
+  fromScaling,
+  fromRotation,
+  fromSkew,
+  multiply,
+  compose,
+  determinant,
+  invert,
+  transformPoint,
+  transformVector,
+  approxEquals as matrixApproxEquals,
+  type Mat2D,
+} from './lib/matrix';

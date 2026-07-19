@@ -34,8 +34,9 @@ The authoritative model and all the math, fully unit-tested without a canvas.
   serialization. (ADR 0004) *(migrations pending.)*
 - ✅ **History engine:** change-recording diff stream over the store; transaction
   batching, coalescing by key, redo invalidation, and `withoutHistory`. (ADR 0004)
-- ⬜ **Transform math:** vec/affine; decomposed **TRS(+skew)** with derived matrix;
-  world-transform composition; bounds. (ADR 0006)
+- ✅ **Transform math:** `vec2`, `Mat2D` affine (compose/invert/point+vector),
+  decomposed **TRS(+skew)** transform with derived matrix, and AABB `bounds`
+  (union/contains/intersect/transform). (ADR 0006)
 - **Camera & coordinate spaces:** screen/world/local; `screenToWorld` /
   `worldToScreen` / viewport bounds (DPR deferred to the backend).
 - **Selection model:** object selection (node ids) + a pixel-selection region type.
