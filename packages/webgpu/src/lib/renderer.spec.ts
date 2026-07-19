@@ -3,11 +3,14 @@ import {
   createCamera,
   createSequentialIdFactory,
   createTransform,
+  ellipsePath,
+  rectPath,
   SceneDocument,
   vec2,
   type GroupNode,
   type ImageNode,
   type LayerNode,
+  type PathNode,
 } from '@rendera/core';
 import { encode8, linearToSrgb, srgbToLinear } from './color';
 import { WebGpuRenderer, type ReadbackResult } from './renderer';
@@ -436,6 +439,77 @@ describe('WebGpuRenderer colour pipeline', () => {
     const luminance = 0.3 * lin(c.r) + 0.59 * lin(c.g) + 0.11 * lin(c.b);
     expect(Math.abs(luminance - 0.5)).toBeLessThan(0.04);
     expect(c.r).toBeGreaterThan(c.g); // hue stayed red
+  });
+
+  // --- vector paths: analytic coverage (ADR 0007) ---
+
+  it('fills a vector rectangle with the right colour and crisp edges', async () => {
+    const doc = SceneDocument.create({ idFactory: createSequentialIdFactory('n') });
+    doc.insert<PathNode>({
+      type: 'path',
+      name: 'r',
+      path: rectPath(16, 16, 32, 32),
+      fill: { type: 'solid', color: { r: 0.8, g: 0.1, b: 0.1, a: 1 } },
+    });
+    const renderer = await WebGpuRenderer.create(makeCanvas(64), { colorSpace: 'srgb', dither: false });
+    renderer.setClearColor({ r: 0, g: 0, b: 0, a: 1 });
+    renderer.setRenderList(buildRenderList(doc, createCamera()));
+    const rb = await renderer.readback();
+
+    // Interior is the red fill (both channels sRGB round-trip).
+    const c = pixel(rb, 32, 32);
+    expect(near(c.r, encode8(linearToSrgb(0.8)))).toBe(true);
+    expect(near(c.g, encode8(linearToSrgb(0.1)))).toBe(true);
+    // Outside is background.
+    expect(Math.max(pixel(rb, 4, 4).r, pixel(rb, 4, 4).g, pixel(rb, 4, 4).b)).toBe(0);
+  });
+
+  it('anti-aliases a vector ellipse edge (partial coverage), resolution-independent', async () => {
+    const build = (): SceneDocument => {
+      const doc = SceneDocument.create({ idFactory: createSequentialIdFactory('n') });
+      doc.insert<PathNode>({
+        type: 'path',
+        name: 'e',
+        path: ellipsePath(32, 32, 24, 24),
+        fill: { type: 'solid', color: { r: 1, g: 1, b: 1, a: 1 } },
+      });
+      return doc;
+    };
+    const partialCount = async (supersample: number): Promise<number> => {
+      const r = await WebGpuRenderer.create(makeCanvas(64), { colorSpace: 'srgb', dither: false, supersample });
+      r.setClearColor({ r: 0, g: 0, b: 0, a: 1 });
+      r.setRenderList(buildRenderList(build(), createCamera()));
+      const rb = await r.readback();
+      let n = 0;
+      for (let i = 0; i < rb.data.length; i += 4) {
+        if (rb.data[i] > 12 && rb.data[i] < 243) n++;
+      }
+      r.destroy();
+      return n;
+    };
+    // The circle's centre fills solid, and there is an anti-aliased rim.
+    expect(await partialCount(1)).toBeGreaterThan(20);
+    // The rim is analytic even without supersampling (1x already smooth).
+  });
+
+  it('honours the even-odd fill rule (a square with a hole)', async () => {
+    const doc = SceneDocument.create({ idFactory: createSequentialIdFactory('n') });
+    doc.insert<PathNode>({
+      type: 'path',
+      name: 'donut',
+      path: { subpaths: [rectPath(8, 8, 48, 48).subpaths[0], rectPath(24, 24, 16, 16).subpaths[0]] },
+      fillRule: 'evenodd',
+      fill: { type: 'solid', color: { r: 1, g: 1, b: 1, a: 1 } },
+    });
+    const renderer = await WebGpuRenderer.create(makeCanvas(64), { colorSpace: 'srgb', dither: false });
+    renderer.setClearColor({ r: 0, g: 0, b: 0, a: 1 });
+    renderer.setRenderList(buildRenderList(doc, createCamera()));
+    const rb = await renderer.readback();
+
+    // Between the squares: filled (white).
+    expect(pixel(rb, 14, 32).r).toBeGreaterThan(230);
+    // Centre of the hole: empty (even-odd cuts it out).
+    expect(pixel(rb, 32, 32).r).toBeLessThan(20);
   });
 
   // NOTE: the on-screen canvas *swapchain* present cannot be verified here —

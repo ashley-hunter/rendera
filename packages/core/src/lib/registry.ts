@@ -11,7 +11,8 @@
  */
 
 import { boundsFromRect, type Bounds } from './bounds';
-import type { ImageNode, LayerNode, SceneNode } from './node';
+import type { ImageNode, LayerNode, PathNode, SceneNode } from './node';
+import { pathBounds, pointInPath } from './path';
 import { IDENTITY_TRANSFORM } from './transform';
 import { type Vec2, ZERO } from './vec2';
 
@@ -113,11 +114,24 @@ const imageUtil: NodeUtil = {
   },
 };
 
+const pathUtil: NodeUtil = {
+  type: 'path',
+  canHaveChildren: () => false,
+  isSpatial: () => true,
+  createDefaults: () => ({ transform: IDENTITY_TRANSFORM }),
+  getLocalBounds: (node) => pathBounds((node as PathNode).path),
+  hitTestLocal: (node, p) => {
+    const { path, fillRule } = node as PathNode;
+    return pointInPath(path, p, fillRule ?? 'nonzero');
+  },
+};
+
 /** A registry pre-populated with the built-in node types. */
 export function createDefaultRegistry(): NodeRegistry {
   return new NodeRegistry()
     .register(documentUtil)
     .register(groupUtil)
     .register(layerUtil)
-    .register(imageUtil);
+    .register(imageUtil)
+    .register(pathUtil);
 }

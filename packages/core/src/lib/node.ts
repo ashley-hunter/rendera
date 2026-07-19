@@ -13,6 +13,7 @@
  */
 
 import type { BlendMode } from './blend';
+import type { FillRule, Path } from './path';
 import type { Transform } from './transform';
 import type { OrderKey } from './ordering';
 import type { NodeId } from './id';
@@ -92,8 +93,23 @@ export interface ImageNode extends SpatialNode {
   assetId: string;
 }
 
+/**
+ * A vector node: a Bézier `path` painted by `fill` under a winding `fillRule`.
+ * Rasterized analytically on the GPU (ADR 0007), so it stays crisp at any zoom.
+ */
+export interface PathNode extends SpatialNode {
+  readonly type: 'path';
+  name: string;
+  /** Local-space geometry. */
+  path: Path;
+  /** How the path is painted (default: an opaque mid-grey solid). */
+  fill?: Fill;
+  /** Winding rule (default `'nonzero'`). */
+  fillRule?: FillRule;
+}
+
 /** The built-in node types known to the default registry. */
-export type KnownNode = DocumentNode | GroupNode | LayerNode | ImageNode;
+export type KnownNode = DocumentNode | GroupNode | LayerNode | ImageNode | PathNode;
 
 /**
  * The fields a caller supplies when inserting a node. `id`/`parentId`/`index`

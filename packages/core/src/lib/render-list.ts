@@ -14,13 +14,21 @@
  * nothing. Being pure, this is unit-tested with no GPU.
  */
 
-import { boundsHeight, boundsWidth } from './bounds';
+import { boundsHeight, boundsWidth, type Bounds } from './bounds';
 import type { BlendMode } from './blend';
 import { worldToScreenMatrix, type Camera } from './camera';
 import type { SceneDocument } from './document';
 import type { NodeId } from './id';
 import { compose, fromScaling, fromTranslation, type Mat2D } from './matrix';
-import type { GroupNode, ImageNode, LayerNode, SpatialNode } from './node';
+import type { GroupNode, ImageNode, LayerNode, PathNode, SpatialNode } from './node';
+import {
+  pathBounds,
+  pathEdges,
+  toQuadraticPath,
+  transformPath,
+  type FillRule,
+  type PathEdge,
+} from './path';
 import { vec2 } from './vec2';
 
 /** A linear-light RGBA colour, components in [0, 1]. */
@@ -56,6 +64,25 @@ export interface DrawImageCommand extends DrawBase {
   readonly assetId: string;
 }
 
+/**
+ * Fill a vector path. Geometry is pre-transformed to screen space with cubics
+ * converted to quadratics, ready for analytic coverage rasterization; the
+ * backend has no `transform` to apply — the edges are final.
+ */
+export interface DrawPathCommand {
+  readonly op: 'draw-path';
+  readonly nodeId: NodeId;
+  /** Resolved linear-light fill colour. */
+  readonly color: LinearRgba;
+  readonly fillRule: FillRule;
+  readonly opacity: number;
+  readonly blend: BlendMode;
+  /** Screen-space edges (lines + quadratics). */
+  readonly edges: readonly PathEdge[];
+  /** Screen-space bounding box of the geometry. */
+  readonly bounds: Bounds;
+}
+
 /** Begin an isolated group: draws until the matching pop target a fresh layer. */
 export interface PushGroupCommand {
   readonly op: 'push-group';
@@ -74,6 +101,7 @@ export interface PopGroupCommand {
 export type RenderCommand =
   | DrawSolidCommand
   | DrawImageCommand
+  | DrawPathCommand
   | PushGroupCommand
   | PopGroupCommand;
 
@@ -106,6 +134,30 @@ export function buildRenderList(doc: SceneDocument, camera: Camera): RenderComma
         for (const child of doc.getChildren(id)) {
           visit(child.id);
         }
+      }
+      return;
+    }
+
+    if (node.type === 'path') {
+      const path = node as PathNode;
+      // Bake local -> world -> screen into the geometry, then convert cubics to
+      // quadratics at a sub-pixel *screen* tolerance so curves stay exact at zoom.
+      const screenMat = compose(worldToScreen, doc.getWorldMatrix(id));
+      const screenPath = toQuadraticPath(transformPath(path.path, screenMat), 0.1);
+      const bounds = pathBounds(screenPath);
+      const edges = pathEdges(screenPath);
+      if (bounds && edges.length > 0) {
+        const color = path.fill?.type === 'solid' ? path.fill.color : DEFAULT_FILL;
+        commands.push({
+          op: 'draw-path',
+          nodeId: id,
+          color,
+          fillRule: path.fillRule ?? 'nonzero',
+          opacity,
+          blend,
+          edges,
+          bounds,
+        });
       }
       return;
     }

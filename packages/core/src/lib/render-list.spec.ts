@@ -2,7 +2,8 @@ import { createCamera } from './camera';
 import { SceneDocument } from './document';
 import { createSequentialIdFactory } from './id';
 import { transformPoint } from './matrix';
-import type { GroupNode, ImageNode, LayerNode } from './node';
+import type { GroupNode, ImageNode, LayerNode, PathNode } from './node';
+import { rectPath } from './path';
 import {
   buildRenderList,
   debugColorForId,
@@ -76,6 +77,31 @@ describe('buildRenderList', () => {
     expect(cmd.assetId).toBe('asset-42');
     expect(cmd.opacity).toBe(0.5);
     expect(cmd.nodeId).toBe(image.id);
+  });
+
+  it('emits a draw-path with screen-space edges and resolved fill', () => {
+    const doc = newDoc();
+    const node = doc.insert<PathNode>({
+      type: 'path',
+      name: 'p',
+      path: rectPath(0, 0, 10, 10),
+      fill: { type: 'solid', color: { r: 0.1, g: 0.2, b: 0.3, a: 1 } },
+      transform: createTransform({ translation: vec2(5, 5) }),
+    });
+    // Camera zoom 2 so we can check the geometry is baked to screen space.
+    const cmds = buildRenderList(doc, createCamera({ zoom: 2 }));
+    expect(cmds).toHaveLength(1);
+    const cmd = cmds[0];
+    expect(cmd.op).toBe('draw-path');
+    if (cmd.op !== 'draw-path') throw new Error('expected draw-path');
+    expect(cmd.nodeId).toBe(node.id);
+    expect(cmd.color).toEqual({ r: 0.1, g: 0.2, b: 0.3, a: 1 });
+    expect(cmd.fillRule).toBe('nonzero');
+    // Rect (0,0,10,10) translated (5,5), zoom 2 -> screen bbox (10,10)..(30,30).
+    expect(cmd.bounds.minX).toBeCloseTo(10, 5);
+    expect(cmd.bounds.maxX).toBeCloseTo(30, 5);
+    // 3 line segments + 1 close.
+    expect(cmd.edges).toHaveLength(4);
   });
 
   it('applies the camera', () => {

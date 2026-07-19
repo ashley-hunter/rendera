@@ -1,6 +1,7 @@
 import type { Meta, StoryObj } from '@storybook/angular';
 import { createBlendScene } from './blend-scene';
 import { createImageSceneSource } from './image-scene';
+import { createVectorScene } from './vector-scene';
 import { WebGpuScene } from './webgpu-scene';
 
 const meta: Meta<WebGpuScene> = {
@@ -29,4 +30,13 @@ export const CrispImage: Story = {
  */
 export const BlendModes: Story = {
   args: { scene: createBlendScene() },
+};
+
+/**
+ * Vector shapes filled by analytic coverage (ADR 0007) — rounded rects, an
+ * ellipse, a star, and an even-odd ring. Zoom in hard: every edge stays
+ * razor-sharp and re-rasterizes at the new scale, with no faceting or blur.
+ */
+export const Vectors: Story = {
+  args: { scene: createVectorScene() },
 };

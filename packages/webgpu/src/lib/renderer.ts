@@ -37,6 +37,21 @@ interface CompositorResources {
   layout: GPUBindGroupLayout;
 }
 
+/** GPU resources for the analytic vector-fill pass. */
+interface PathResources {
+  pipeline: GPURenderPipeline;
+  layout: GPUBindGroupLayout;
+  /** Viewport uniform bound for BOTH stages (the fragment reads the scale). */
+  viewportBindGroup: GPUBindGroup;
+}
+
+/** Per-path-draw packing: where its edges sit and its params slot. */
+interface PathDraw {
+  edgeOffset: number;
+  edgeCount: number;
+  slot: number;
+}
+
 /** A layer target on the compositing stack, with the group's compositing props. */
 interface StackEntry {
   tex: GPUTexture;
@@ -320,6 +335,133 @@ fn blendColor(mode : i32, Cb : vec3f, Cs : vec3f) -> vec3f {
 }
 `;
 
+// Analytic vector fill (ADR 0007). Per pixel: winding number (ray crossings) for
+// inside/outside under the fill rule, plus the exact distance to the nearest
+// edge (line or quadratic) for a resolution-independent ~1px anti-aliased rim.
+// Geometry is in device px; the fragment position is divided by the supersample
+// scale to match, so the AA band is one *display* pixel wide at any zoom.
+const PATH_SHADER = /* wgsl */ `
+struct Viewport { size : vec2f, scale : f32, _pad : f32 };
+@group(0) @binding(0) var<uniform> vp : Viewport;
+
+struct Edge { a : vec2f, b : vec2f, c : vec2f, kind : vec2f };
+@group(1) @binding(0) var<storage, read> edges : array<Edge>;
+struct PathParams { color : vec4f, bbox : vec4f, counts : vec4u, misc : vec4f };
+@group(1) @binding(1) var<uniform> pp : PathParams;
+
+@vertex fn vs(@location(0) corner : vec2f) -> @builtin(position) vec4f {
+  let pad = 2.0; // device px, so the AA rim is never clipped by the bbox quad
+  let lo = pp.bbox.xy - vec2f(pad, pad);
+  let hi = pp.bbox.zw + vec2f(pad, pad);
+  let dev = mix(lo, hi, corner);
+  let clip = vec2f(dev.x / vp.size.x * 2.0 - 1.0, 1.0 - dev.y / vp.size.y * 2.0);
+  return vec4f(clip, 0.0, 1.0);
+}
+
+fn dLine(p : vec2f, a : vec2f, b : vec2f) -> f32 {
+  let pa = p - a;
+  let ba = b - a;
+  let h = clamp(dot(pa, ba) / max(dot(ba, ba), 1e-8), 0.0, 1.0);
+  return length(pa - ba * h);
+}
+
+// Exact distance to a quadratic Bézier (Inigo Quilez, Cardano's method).
+fn dQuad(pos : vec2f, A : vec2f, B : vec2f, C : vec2f) -> f32 {
+  let a = B - A;
+  let b = A - 2.0 * B + C;
+  let c = a * 2.0;
+  let d = A - pos;
+  let kk = 1.0 / max(dot(b, b), 1e-8);
+  let kx = kk * dot(a, b);
+  let ky = kk * (2.0 * dot(a, a) + dot(d, b)) / 3.0;
+  let kz = kk * dot(d, a);
+  let p = ky - kx * kx;
+  let p3 = p * p * p;
+  let q = kx * (2.0 * kx * kx - 3.0 * ky) + kz;
+  var h = q * q + 4.0 * p3;
+  if (h >= 0.0) {
+    h = sqrt(h);
+    let x = (vec2f(h, -h) - q) / 2.0;
+    let uv = sign(x) * pow(abs(x), vec2f(1.0 / 3.0));
+    let t = clamp(uv.x + uv.y - kx, 0.0, 1.0);
+    let qd = d + (c + b * t) * t;
+    return sqrt(dot(qd, qd));
+  }
+  let z = sqrt(-p);
+  let v = acos(q / (p * z * 2.0)) / 3.0;
+  let m = cos(v);
+  let n = sin(v) * 1.732050808;
+  let t = clamp(vec3f(m + m, -n - m, n - m) * z - kx, vec3f(0.0), vec3f(1.0));
+  let q1 = d + (c + b * t.x) * t.x;
+  let q2 = d + (c + b * t.y) * t.y;
+  return sqrt(min(dot(q1, q1), dot(q2, q2)));
+}
+
+fn windLine(p : vec2f, a : vec2f, c : vec2f) -> i32 {
+  let up = a.y <= p.y && c.y > p.y;
+  let down = c.y <= p.y && a.y > p.y;
+  if (!up && !down) { return 0; }
+  let t = (p.y - a.y) / (c.y - a.y);
+  if (a.x + t * (c.x - a.x) > p.x) {
+    if (up) { return 1; }
+    return -1;
+  }
+  return 0;
+}
+
+fn crossQuad(p : vec2f, A : vec2f, B : vec2f, C : vec2f, a2 : f32, b1 : f32, t : f32) -> i32 {
+  if (t < 0.0 || t > 1.0) { return 0; }
+  let u = 1.0 - t;
+  let x = u * u * A.x + 2.0 * u * t * B.x + t * t * C.x;
+  if (x <= p.x) { return 0; }
+  let dy = 2.0 * a2 * t + b1;
+  if (dy > 0.0) { return 1; }
+  if (dy < 0.0) { return -1; }
+  return 0;
+}
+
+fn windQuad(p : vec2f, A : vec2f, B : vec2f, C : vec2f) -> i32 {
+  let a2 = A.y - 2.0 * B.y + C.y;
+  let b1 = 2.0 * (B.y - A.y);
+  let c0 = A.y - p.y;
+  var w = 0;
+  if (abs(a2) < 1e-6) {
+    if (abs(b1) > 1e-9) { w = w + crossQuad(p, A, B, C, a2, b1, -c0 / b1); }
+    return w;
+  }
+  let disc = b1 * b1 - 4.0 * a2 * c0;
+  if (disc < 0.0) { return 0; }
+  let s = sqrt(disc);
+  w = w + crossQuad(p, A, B, C, a2, b1, (-b1 - s) / (2.0 * a2));
+  w = w + crossQuad(p, A, B, C, a2, b1, (-b1 + s) / (2.0 * a2));
+  return w;
+}
+
+@fragment fn fs(@builtin(position) frag : vec4f) -> @location(0) vec4f {
+  let p = frag.xy / vp.scale; // target px -> device px (edge space)
+  let offset = pp.counts.x;
+  let count = pp.counts.y;
+  var winding = 0;
+  var dist = 1e9;
+  for (var i = 0u; i < count; i = i + 1u) {
+    let e = edges[offset + i];
+    if (e.kind.x > 0.5) {
+      dist = min(dist, dQuad(p, e.a, e.b, e.c));
+      winding = winding + windQuad(p, e.a, e.b, e.c);
+    } else {
+      dist = min(dist, dLine(p, e.a, e.c));
+      winding = winding + windLine(p, e.a, e.c);
+    }
+  }
+  var inside = winding != 0;
+  if (pp.counts.z == 1u) { inside = (winding & 1) != 0; }
+  let signed = select(dist, -dist, inside);
+  let coverage = clamp(0.5 - signed, 0.0, 1.0); // ~1 device-px analytic rim
+  let alpha = pp.color.a * pp.misc.x * coverage;
+  return vec4f(pp.color.rgb * alpha, alpha); // premultiplied linear
+}
+`;
+
 const SCENE_FORMAT: GPUTextureFormat = 'rgba16float';
 const IMAGE_FORMAT: GPUTextureFormat = 'rgba8unorm-srgb';
 
@@ -349,6 +491,12 @@ export class WebGpuRenderer {
   private readonly targetPool: GPUTexture[] = [];
   private targetFree: GPUTexture[] = [];
 
+  /** Vector-fill state: edge storage, per-draw params, and packing records. */
+  private edgeBuffer: GPUBuffer | null = null;
+  private pathParamsBuffer: GPUBuffer;
+  private pathParamsSlots = 0;
+  private pathDraws: PathDraw[] = [];
+
   private readonly imageCache = new Map<string, CachedImage>();
 
   private constructor(
@@ -366,6 +514,7 @@ export class WebGpuRenderer {
     private readonly noiseTexture: GPUTexture,
     private readonly image: ImageResources,
     private readonly compositor: CompositorResources,
+    private readonly pathResources: PathResources,
     width: number,
     height: number,
     supersample: number
@@ -379,6 +528,11 @@ export class WebGpuRenderer {
       usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
     });
     this.blendParamsSlots = 1;
+    this.pathParamsBuffer = this.device.createBuffer({
+      size: 256,
+      usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+    });
+    this.pathParamsSlots = 1;
     this.updateViewport();
     this.writeParams();
   }
@@ -597,6 +751,55 @@ export class WebGpuRenderer {
       layout: blendLayout,
     };
 
+    // --- vector-fill pipeline (analytic coverage -> layer target) ---
+    const pathModule = device.createShaderModule({ code: PATH_SHADER });
+    // The path shader reads the viewport in both stages (fragment needs the
+    // supersample scale), so it can't reuse the vertex-only quad layout.
+    const pathViewportLayout = device.createBindGroupLayout({
+      entries: [
+        { binding: 0, visibility: GPUShaderStage.VERTEX | GPUShaderStage.FRAGMENT, buffer: { type: 'uniform' } },
+      ],
+    });
+    const pathViewportBindGroup = device.createBindGroup({
+      layout: pathViewportLayout,
+      entries: [{ binding: 0, resource: { buffer: viewportBuffer } }],
+    });
+    const pathBindLayout = device.createBindGroupLayout({
+      entries: [
+        { binding: 0, visibility: GPUShaderStage.FRAGMENT, buffer: { type: 'read-only-storage' } },
+        { binding: 1, visibility: GPUShaderStage.VERTEX | GPUShaderStage.FRAGMENT, buffer: { type: 'uniform' } },
+      ],
+    });
+    const pathPipeline = device.createRenderPipeline({
+      layout: device.createPipelineLayout({ bindGroupLayouts: [pathViewportLayout, pathBindLayout] }),
+      vertex: {
+        module: pathModule,
+        entryPoint: 'vs',
+        buffers: [
+          { arrayStride: 8, stepMode: 'vertex', attributes: [{ shaderLocation: 0, offset: 0, format: 'float32x2' }] },
+        ],
+      },
+      fragment: {
+        module: pathModule,
+        entryPoint: 'fs',
+        targets: [
+          {
+            format: SCENE_FORMAT,
+            blend: {
+              color: { srcFactor: 'one', dstFactor: 'one-minus-src-alpha', operation: 'add' },
+              alpha: { srcFactor: 'one', dstFactor: 'one-minus-src-alpha', operation: 'add' },
+            },
+          },
+        ],
+      },
+      primitive: { topology: 'triangle-strip' },
+    });
+    const pathResources: PathResources = {
+      pipeline: pathPipeline,
+      layout: pathBindLayout,
+      viewportBindGroup: pathViewportBindGroup,
+    };
+
     const width = Math.max(1, canvas.width || 1);
     const height = Math.max(1, canvas.height || 1);
 
@@ -615,6 +818,7 @@ export class WebGpuRenderer {
       noiseTexture,
       imageResources,
       compositorResources,
+      pathResources,
       width,
       height,
       options.supersample ?? 2
@@ -718,6 +922,8 @@ export class WebGpuRenderer {
 
     const solids: number[] = [];
     const images: number[] = [];
+    const edges: number[] = [];
+    this.pathDraws = [];
     let blendOps = 0;
     for (const cmd of commands) {
       if (cmd.op === 'draw-solid') {
@@ -728,6 +934,13 @@ export class WebGpuRenderer {
       } else if (cmd.op === 'draw-image') {
         const m = cmd.transform;
         images.push(m.a, m.b, m.c, m.d, m.e, m.f, cmd.opacity, 0);
+        if (cmd.blend !== 'normal') blendOps++;
+      } else if (cmd.op === 'draw-path') {
+        const edgeOffset = edges.length / 8;
+        for (const e of cmd.edges) {
+          edges.push(e.a.x, e.a.y, e.b.x, e.b.y, e.c.x, e.c.y, e.quad ? 1 : 0, 0);
+        }
+        this.pathDraws.push({ edgeOffset, edgeCount: cmd.edges.length, slot: this.pathDraws.length });
         if (cmd.blend !== 'normal') blendOps++;
       } else if (cmd.op === 'push-group') {
         blendOps++; // the matching pop composites the group (one blend pass)
@@ -746,7 +959,68 @@ export class WebGpuRenderer {
       this.imageBuffer = this.ensureVertexBuffer(this.imageBuffer, data.byteLength, 'image');
       this.device.queue.writeBuffer(this.imageBuffer, 0, data);
     }
+    if (edges.length > 0) {
+      const data = new Float32Array(edges);
+      this.edgeBuffer = this.ensureStorageBuffer(this.edgeBuffer, data.byteLength);
+      this.device.queue.writeBuffer(this.edgeBuffer, 0, data);
+      this.packPathParams(commands);
+    }
     this.ensureBlendParams(blendOps);
+  }
+
+  /** Pack per-path-draw uniforms (color, bbox, counts, opacity) into 256B slots. */
+  private packPathParams(commands: readonly RenderCommand[]): void {
+    this.ensurePathParams(this.pathDraws.length);
+    const buf = new ArrayBuffer(this.pathDraws.length * 256);
+    const f32 = new Float32Array(buf);
+    const u32 = new Uint32Array(buf);
+    let draw = 0;
+    for (const cmd of commands) {
+      if (cmd.op !== 'draw-path') {
+        continue;
+      }
+      const rec = this.pathDraws[draw];
+      const o = draw * 64; // 256 bytes / 4
+      f32[o] = cmd.color.r;
+      f32[o + 1] = cmd.color.g;
+      f32[o + 2] = cmd.color.b;
+      f32[o + 3] = cmd.color.a;
+      f32[o + 4] = cmd.bounds.minX;
+      f32[o + 5] = cmd.bounds.minY;
+      f32[o + 6] = cmd.bounds.maxX;
+      f32[o + 7] = cmd.bounds.maxY;
+      u32[o + 8] = rec.edgeOffset;
+      u32[o + 9] = rec.edgeCount;
+      u32[o + 10] = cmd.fillRule === 'evenodd' ? 1 : 0;
+      f32[o + 12] = cmd.opacity; // misc.x
+      draw++;
+    }
+    this.device.queue.writeBuffer(this.pathParamsBuffer, 0, buf);
+  }
+
+  private ensureStorageBuffer(existing: GPUBuffer | null, byteLength: number): GPUBuffer {
+    if (existing && existing.size >= byteLength) {
+      return existing;
+    }
+    existing?.destroy();
+    return this.device.createBuffer({
+      label: 'path-edges',
+      size: byteLength,
+      usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+    });
+  }
+
+  private ensurePathParams(slots: number): void {
+    const need = Math.max(1, slots);
+    if (need <= this.pathParamsSlots) {
+      return;
+    }
+    this.pathParamsBuffer.destroy();
+    this.pathParamsBuffer = this.device.createBuffer({
+      size: need * 256,
+      usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+    });
+    this.pathParamsSlots = need;
   }
 
   /** Grow a vertex buffer if needed, returning one at least `byteLength` big. */
@@ -828,6 +1102,8 @@ export class WebGpuRenderer {
     this.unitQuadBuffer.destroy();
     this.noiseTexture.destroy();
     this.blendParamsBuffer.destroy();
+    this.pathParamsBuffer.destroy();
+    this.edgeBuffer?.destroy();
     this.solidBuffer?.destroy();
     this.imageBuffer?.destroy();
     this.destroyTargetPool();
@@ -857,6 +1133,7 @@ export class WebGpuRenderer {
 
     let solidCursor = 0;
     let imageCursor = 0;
+    let pathCursor = 0;
     let blendSlot = 0;
 
     for (const cmd of this.commands) {
@@ -882,8 +1159,8 @@ export class WebGpuRenderer {
         continue;
       }
 
-      // A leaf draw (solid or image).
-      const index = cmd.op === 'draw-solid' ? solidCursor : imageCursor;
+      // A leaf draw (solid, image, or vector path).
+      const index = cmd.op === 'draw-solid' ? solidCursor : cmd.op === 'draw-image' ? imageCursor : pathCursor;
       if (cmd.blend === 'normal') {
         this.drawLeaf(encoder, cmd, top.tex, index, 'load');
       } else {
@@ -899,8 +1176,10 @@ export class WebGpuRenderer {
       }
       if (cmd.op === 'draw-solid') {
         solidCursor++;
-      } else {
+      } else if (cmd.op === 'draw-image') {
         imageCursor++;
+      } else {
+        pathCursor++;
       }
     }
 
@@ -929,6 +1208,28 @@ export class WebGpuRenderer {
       pass.setVertexBuffer(0, this.unitQuadBuffer);
       pass.setVertexBuffer(1, this.imageBuffer);
       pass.draw(4, 1, 0, index);
+      pass.end();
+      return;
+    }
+    if (cmd.op === 'draw-path') {
+      if (!this.edgeBuffer) {
+        return;
+      }
+      const bindGroup = this.device.createBindGroup({
+        layout: this.pathResources.layout,
+        entries: [
+          { binding: 0, resource: { buffer: this.edgeBuffer } },
+          { binding: 1, resource: { buffer: this.pathParamsBuffer, offset: index * 256, size: 64 } },
+        ],
+      });
+      const pass = encoder.beginRenderPass({
+        colorAttachments: [{ view: target.createView(), loadOp, storeOp: 'store', clearValue: { r: 0, g: 0, b: 0, a: 0 } }],
+      });
+      pass.setPipeline(this.pathResources.pipeline);
+      pass.setBindGroup(0, this.pathResources.viewportBindGroup);
+      pass.setBindGroup(1, bindGroup);
+      pass.setVertexBuffer(0, this.unitQuadBuffer);
+      pass.draw(4);
       pass.end();
       return;
     }
@@ -1036,11 +1337,13 @@ export class WebGpuRenderer {
   private updateViewport(): void {
     // Viewport stays at *display* resolution: clip space is resolution-
     // independent, so the render list rasterizes into the larger (supersampled)
-    // scene target at higher density without any change to its coordinates.
+    // scene target at higher density without any change to its coordinates. The
+    // third component carries the supersample scale (the path shader divides the
+    // fragment position by it to reach device-pixel edge space).
     this.device.queue.writeBuffer(
       this.viewportBuffer,
       0,
-      new Float32Array([this.width, this.height, 0, 0])
+      new Float32Array([this.width, this.height, this.sampleScale, 0])
     );
   }
 
