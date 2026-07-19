@@ -43,6 +43,11 @@ jobs:
 
       - name: Setup Pages
         uses: actions/configure-pages@v5
+        with:
+          # Enable GitHub Pages via the API on first run so no manual repo
+          # settings toggle is required (needs the `pages: write` permission
+          # declared above).
+          enablement: true
 
       - name: Upload Storybook artifact
         uses: actions/upload-pages-artifact@v3
