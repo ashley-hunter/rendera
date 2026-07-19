@@ -25,17 +25,17 @@ Foundation so every later phase ships safely.
   may not import DOM/GPU/framework packages; direction is `angular → renderer → core`.
 - ⬜ Headless test conventions for the core (Vitest, no canvas).
 
-## Phase 1 — Engine kernel (headless, no pixels)  ⬜  → `@rendera/core`
+## Phase 1 — Engine kernel (headless, no pixels)  🔨  → `@rendera/core`
 
 The authoritative model and all the math, fully unit-tested without a canvas.
 
-- **Document model:** flat `Map<NodeId, Node>` record store; node-type + util
-  registries; `parentId` + fractional index (LexoRank) for z-order; serialization
-  with schema version + migrations. (ADR 0004)
-- **Transform math:** vec/affine; decomposed **TRS(+skew)** with derived matrix;
+- ✅ **Document model:** flat `Map<NodeId, Node>` record store; node-type + util
+  registries; `parentId` + fractional index for z-order; versioned JSON
+  serialization. (ADR 0004) *(migrations pending.)*
+- ✅ **History engine:** change-recording diff stream over the store; transaction
+  batching, coalescing by key, redo invalidation, and `withoutHistory`. (ADR 0004)
+- ⬜ **Transform math:** vec/affine; decomposed **TRS(+skew)** with derived matrix;
   world-transform composition; bounds. (ADR 0006)
-- **History engine:** diff/mark/batch/squash over the store; ephemeral state
-  excluded. (ADR 0004)
 - **Camera & coordinate spaces:** screen/world/local; `screenToWorld` /
   `worldToScreen` / viewport bounds (DPR deferred to the backend).
 - **Selection model:** object selection (node ids) + a pixel-selection region type.
