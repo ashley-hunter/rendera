@@ -13,6 +13,6 @@ type Story = StoryObj<Rendera>;
 export const Primary: Story = {
   args: {},
   play: async ({ canvas }) => {
-    await expect(canvas.getByText(/core/i)).toBeTruthy();
+    await expect(canvas.getByText(/Untitled/i)).toBeTruthy();
   },
 };

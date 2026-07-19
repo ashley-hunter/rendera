@@ -3,9 +3,9 @@
   "compilerOptions": {
     "outDir": "../../dist/out-tsc",
     "declaration": true,
+    "lib": ["ES2022"],
     "types": [
-      "node",
-      "vite/client"
+      "node"
     ]
   },
   "include": [

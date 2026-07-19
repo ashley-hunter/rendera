@@ -4,7 +4,7 @@
   "sourceRoot": "packages/angular/src",
   "prefix": "rendera",
   "projectType": "library",
-  "tags": [],
+  "tags": ["scope:angular", "type:lib", "layer:wrapper"],
   "targets": {
     "build": {
       "executor": "@nx/angular:ng-packagr-lite",

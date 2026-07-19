@@ -27,10 +27,26 @@ export default [
                     ],
                     depConstraints: [
                         {
-                            sourceTag: "*",
+                            // Layered architecture: angular (wrapper) -> renderer -> core.
+                            // The core kernel may depend on nothing but itself.
+                            sourceTag: "layer:core",
+                            onlyDependOnLibsWithTags: ["layer:core"]
+                        },
+                        {
+                            sourceTag: "layer:renderer",
+                            onlyDependOnLibsWithTags: ["layer:core", "layer:renderer"]
+                        },
+                        {
+                            sourceTag: "layer:wrapper",
                             onlyDependOnLibsWithTags: [
-                                "*"
+                                "layer:core",
+                                "layer:renderer",
+                                "layer:wrapper"
                             ]
+                        },
+                        {
+                            sourceTag: "type:lib",
+                            onlyDependOnLibsWithTags: ["type:lib"]
                         }
                     ]
                 }
