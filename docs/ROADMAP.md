@@ -5,9 +5,10 @@
 > rule (ADR 0001): fundamentals first — later phases compose onto a proven core,
 > nothing is built twice.
 >
-> Sequencing note: raster painting is placed before vector tooling because the
-> north-star is "Photoshop crispness" and the proof-of-core is a minimal raster
-> layer. This order is adjustable — vector-first is a viable swap after Phase 2.
+> Sequencing note: raster rendering is placed before vector because the
+> proof-of-core is a minimal raster layer that exercises the whole compositor and
+> colour pipeline. This order is adjustable — vector-first is a viable swap after
+> Phase 2.
 
 ## Status legend
 ✅ done · 🔨 in progress · ⬜ not started
@@ -49,7 +50,7 @@ The authoritative model and all the math, fully unit-tested without a canvas.
 
 ## Phase 2 — WebGPU compositor & colour pipeline (first pixels)  ⬜  → `@rendera/webgpu`
 
-The heart of "Photoshop crispness". This is the minimal-raster proof from ADR 0001.
+The heart of the quality bar. This is the minimal-raster proof from ADR 0001.
 
 - **Device/context:** capability detection (Display-P3, texture-format tiers,
   `maxTextureDimension2D`, subgroups); preferred format; premultiplied alpha;
@@ -64,16 +65,16 @@ The heart of "Photoshop crispness". This is the minimal-raster proof from ADR 00
 - **Showcase:** a crisp image on a pannable/zoomable/rotatable canvas — the first
   visible quality bar, on desktop and mobile.
 
-## Phase 3 — Raster painting: brush engine  ⬜  → `@rendera/raster`
+## Phase 3 — Raster rendering & brush primitives  ⬜  → `@rendera/raster`
 
-- **Brush engine:** stamp/spacing model; per-stroke `rgba16float` buffer;
+- **Brush/stroke engine:** stamp/spacing model; per-stroke `rgba16float` buffer;
   sub-pixel dabs; `over`-accumulation in linear premultiplied; commit to layer
   tiles; **tile-snapshot undo**; pressure/tilt dynamics (size/opacity/flow);
   AA-off (pixel) mode.
 - **Layers:** create / reorder (fractional index) / opacity / visibility / lock.
 - **Blend modes:** separable + non-separable (W3C Compositing-1) in the
-  compositor; per-document "blend in gamma space" (Photoshop-legacy) toggle.
-- **Showcase:** a painting demo with layers and blend modes.
+  compositor; per-document "blend in gamma space" (legacy) toggle.
+- **Showcase:** brush strokes across layers and blend modes.
 
 ## Phase 4 — Selection, transforms, groups  ⬜  → `@rendera/core` + `@rendera/webgpu`
 
@@ -89,9 +90,9 @@ The heart of "Photoshop crispness". This is the minimal-raster proof from ADR 00
 - **Path/shape model** (Bézier); fills / strokes / gradients (interpolated in
   linear/OKLab); boolean ops.
 - **Analytic-quality vector rasterization** into the tile grid — evaluate a
-  Vello-style compute path vs a Rive-style triangle-patch+coverage pass
+  compute-based coverage path vs a triangle-patch + coverage-accumulation pass
   (tessellation is the known WebGL2-fallback shape). Decide via a spike; record an ADR.
-- **Text:** MSDF atlas for UI/zoomable text + a high-quality path for large/display type.
+- **Text:** MSDF atlas for zoomable UI text + a high-quality path for large/display type.
 - **Showcase:** resolution-independent vector drawing that stays crisp at any zoom.
 
 ## Phase 6 — Effects & non-destructive stack  ⬜  → `@rendera/effects`
@@ -117,7 +118,7 @@ The heart of "Photoshop crispness". This is the minimal-raster proof from ADR 00
 Unblocked by the model (ADR 0004/0006); built last.
 
 - **Timelines / keyframes / easing** writing to `(nodeId, propertyPath)` channels.
-- **State machines + inputs** (Rive model) blending timelines.
+- **State machines + inputs** blending timelines.
 - **Rigging:** bone hierarchy (a node's transform parent may be a bone), slots /
   attachments / skins, mesh vertex-weight skinning, IK.
 - **Showcase:** a keyframed animation and a simple bone-rigged, skinned character.

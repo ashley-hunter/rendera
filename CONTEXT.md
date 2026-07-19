@@ -6,15 +6,17 @@
 
 ## What Rendera is
 
-Rendera is a **GPU canvas rendering engine** and the basis for increasingly
-high-quality rendering software — drawing and vector apps in the class of
-Photoshop (raster) and Illustrator/Figma (vector), growing toward compositing,
-effects, and animation/rigging (bones, skinning).
+Rendera is a generic, framework-agnostic **GPU canvas rendering engine** — a
+library, not an application. It provides the building blocks for high-quality
+interactive graphics of any kind: a document/scene model, GPU compositing, layers
+and groups, transforms, selection, undo/redo, raster and vector rendering,
+effects, and (in time) animation and rigging. Consumers build whatever they need
+on top; **this repository ships the library only — no end-user application.**
 
 Two north stars:
 
-1. **Quality** — "Photoshop crispness". Correct colour and precision are the
-   foundation, not a polish step.
+1. **Quality** — reference-quality, crisp output. Correct colour and precision
+   are the foundation, not a polish step.
 2. **Fundamentals first** — do things the best way for the long term, not the
    fast way. Breadth of features is layered onto a proven core.
 
@@ -114,7 +116,7 @@ their place in the code and conversations.
 ### Animation (future, kept unblocked)
 - **Timeline / keyframe / easing** — property animation channels over time.
 - **State machine / input** — higher-level control blending timelines via
-  boolean/number/trigger inputs (Rive model).
+  boolean/number/trigger inputs.
 - **Bone / slot / attachment / skin / vertex weight / IK** — skeletal rigging:
   bone hierarchy, draw-order slots, drawables, swappable sets, mesh-skinning
   weights, inverse kinematics.

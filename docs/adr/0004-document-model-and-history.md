@@ -7,8 +7,8 @@
 ## Context
 
 The document model is the most expensive decision to reverse: it pins
-serialization/file format, undo, selection, and any future multiplayer. Research
-into Figma, tldraw, and Excalidraw shows a consistent pattern — a **flat,
+serialization/file format, undo, selection, and any future multiplayer. The
+consistent pattern across modern interactive-graphics engines is a **flat,
 serializable, ID-keyed store**, with behaviour separated from data, and history
 expressed as **diffs** over that store. The product owner has chosen to **design
 for real-time multiplayer without building it now**.

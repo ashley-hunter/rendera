@@ -5,15 +5,15 @@
 
 ## Context
 
-Rendera aims to be the basis for increasingly high-quality rendering software:
-a canvas engine for drawing and vector apps, with layers, blending, effects,
-compositing, and eventually animation, rigging, and skeletal (bones) tools. The
-bar for output quality is "Photoshop crispness", and performance must stay
-fluid on both desktop and mobile.
+Rendera is a generic GPU canvas rendering engine — a library, not an
+application. Its capability surface spans several domains: raster rendering,
+resolution-independent vector rendering, layers/blending/effects/compositing,
+and eventually animation and skeletal (bones) rigging. The bar for output
+quality is reference-grade crispness, and performance must stay fluid on both
+desktop and mobile.
 
-The scope effectively spans three products' worth of engine — a raster painting
-editor, a vector design editor, and an animation/rigging system. Building all of
-it at once risks getting the shared fundamentals wrong. The stated goal is
+Those domains effectively amount to several engines' worth of scope. Building
+them all at once risks getting the shared fundamentals wrong. The stated goal is
 explicitly *not* speed of delivery but doing things the best way for the long
 term.
 

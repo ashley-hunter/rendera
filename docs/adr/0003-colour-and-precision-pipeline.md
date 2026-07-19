@@ -6,12 +6,12 @@
 
 ## Context
 
-"Photoshop crispness" is, more than anything else, a colour-and-precision
-discipline. Research across NVIDIA GPU Gems, the W3C Compositing spec, Krita's
-colour docs, and practitioner write-ups converges on a small set of
-non-negotiable rules. Getting these wrong produces the classic amateur symptoms:
-muddy 50/50 blends, dark halos around blurred/soft edges, banding in shadows and
-gradients, and colour shifts on resize.
+Reference-grade crispness is, more than anything else, a colour-and-precision
+discipline. Colour-science references, the W3C Compositing spec, and established
+GPU rendering practice converge on a small set of non-negotiable rules. Getting
+these wrong produces the classic amateur symptoms: muddy 50/50 blends, dark halos
+around blurred/soft edges, banding in shadows and gradients, and colour shifts on
+resize.
 
 The chosen ambition (decided with the product owner) is **wide-gamut from day
 one**: a linear Display-P3 working space and Display-P3 canvas output, so colours
@@ -52,8 +52,8 @@ Concrete pipeline:
 - **Dither only at the final quantisation** (blue-noise), never mid-pipeline.
 - **Always tag exported files** with their colour profile (sRGB or Display-P3).
 - **Feature-detect** the Display-P3 canvas path and fall back to sRGB output.
-- Provide a per-document **"blend in gamma space" toggle** for bit-exact
-  Photoshop-legacy blend-mode matching (default is physically-correct linear).
+- Provide a per-document **"blend in gamma space" toggle** for bit-exact matching
+  of legacy gamma-space blend-mode behaviour (default is physically-correct linear).
 
 ## Consequences
 

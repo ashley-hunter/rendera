@@ -6,13 +6,12 @@
 
 ## Context
 
-Rendera targets Photoshop/Illustrator-class quality: non-destructive effect
-stacks, many-layer compositing with blend modes, and analytic-quality vector
-rendering, fluid on desktop and mobile. Research into how the serious engines are
-built (Figma, Skia's next-gen Graphite backend, Rive, Vello/piet-gpu) shows they
-all sit on the **compute-capable modern GPU stack**.
+Rendera targets reference-grade quality: non-destructive effect stacks,
+many-layer compositing with blend modes, and analytic-quality vector rendering,
+fluid on desktop and mobile. The modern GPU rendering engines that achieve this
+class of quality all sit on the **compute-capable modern GPU stack**.
 
-The decisive fact: **WebGL2 has no compute pipeline.** Vello-class path
+The decisive fact: **WebGL2 has no compute pipeline.** Compute-based path
 rasterization, GPU effect/filter stacks, culling, and prefix-sum-based
 parallelism all require compute shaders, storage buffers/textures, and workgroup
 shared memory — none of which WebGL2 exposes. A WebGL2 renderer is therefore
@@ -38,9 +37,9 @@ limits.
 
 ## Consequences
 
-- Users on browsers without WebGPU cannot run the app until a fallback backend is
-  written. We accept this for v1; we detect WebGPU support and show a clear,
-  graceful message rather than a broken canvas.
+- Consumers on browsers without WebGPU cannot render until a fallback backend is
+  written. We accept this for v1; the engine detects WebGPU support and surfaces a
+  clear capability signal rather than failing opaquely.
 - Every optional WebGPU capability (Display-P3, HDR tone-mapping, texture-format
   tiers, `maxTextureDimension2D`, subgroups) must be **feature-detected** with a
   fallback path — especially on Android/mobile, where support and limits vary by
@@ -59,5 +58,5 @@ limits.
 
 - Compute is the dividing line: WebGL2 cannot express the effect/compositing/
   vector-rasterization work this engine needs.
-- Prior art on the same bet: Figma (migrated renderer to WebGPU), Skia Graphite
-  (Dawn/WebGPU-oriented), Rive Renderer, Vello/piet-gpu.
+- This matches the direction of modern compute-based GPU rendering engines, which
+  have made the same WebGPU/compute bet.
