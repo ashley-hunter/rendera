@@ -1,4 +1,5 @@
 import type { Meta, StoryObj } from '@storybook/angular';
+import { createBlendScene } from './blend-scene';
 import { createImageSceneSource } from './image-scene';
 import { WebGpuScene } from './webgpu-scene';
 
@@ -19,4 +20,13 @@ export const Default: Story = { args: {} };
  */
 export const CrispImage: Story = {
   args: { scene: createImageSceneSource() },
+};
+
+/**
+ * The compositor: four vivid backdrop bands with a 4x4 grid of the W3C blend
+ * modes over them (row-major, matching `BLEND_MODES` — multiply, screen,
+ * overlay, …), all composited in linear light, plus a half-opacity group.
+ */
+export const BlendModes: Story = {
+  args: { scene: createBlendScene() },
 };
