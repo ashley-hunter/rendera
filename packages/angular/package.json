@@ -1,6 +1,8 @@
 {
   "name": "@rendera/angular",
   "version": "0.0.1",
+  "private": true,
+  "license": "UNLICENSED",
   "peerDependencies": {
     "@angular/core": "^22.0.0"
   },

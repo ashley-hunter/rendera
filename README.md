@@ -53,3 +53,9 @@ pnpm nx storybook angular
 
 Storybook showcases the library's capabilities and is published to GitHub Pages
 on every push to `main`.
+
+## License
+
+Proprietary — **all rights reserved**. This software may not be used, copied,
+distributed, or modified in any way without the prior express written permission
+of the copyright holder. See [`LICENSE`](LICENSE).
