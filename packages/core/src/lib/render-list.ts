@@ -19,8 +19,9 @@ import type { BlendMode } from './blend';
 import { worldToScreenMatrix, type Camera } from './camera';
 import type { SceneDocument } from './document';
 import type { NodeId } from './id';
-import { compose, fromScaling, fromTranslation, type Mat2D } from './matrix';
+import { compose, fromScaling, fromTranslation, invert, IDENTITY, type Mat2D } from './matrix';
 import type { GroupNode, ImageNode, LayerNode, PathNode, SpatialNode } from './node';
+import type { Paint } from './paint';
 import {
   pathBounds,
   pathEdges,
@@ -73,8 +74,13 @@ export interface DrawImageCommand extends DrawBase {
 export interface DrawPathCommand {
   readonly op: 'draw-path';
   readonly nodeId: NodeId;
-  /** Resolved linear-light fill colour. */
-  readonly color: LinearRgba;
+  /** How the coverage is painted: a flat colour or a gradient. Gradient
+   * geometry is in the node's local space (see `screenToLocal`). */
+  readonly paint: Paint;
+  /** Maps a screen-space (logical px) point back to the node's local space, so
+   * the backend can evaluate gradient geometry per pixel. Identity for a
+   * degenerate transform. */
+  readonly screenToLocal: Mat2D;
   readonly fillRule: FillRule;
   readonly opacity: number;
   readonly blend: BlendMode;
@@ -145,17 +151,21 @@ export function buildRenderList(doc: SceneDocument, camera: Camera): RenderComma
       // quadratics at a sub-pixel *screen* tolerance so curves stay exact at zoom.
       const screenMat = compose(worldToScreen, doc.getWorldMatrix(id));
       const screenPath = toQuadraticPath(transformPath(path.path, screenMat), 0.1);
+      // Gradient geometry is authored in local space; the backend maps each
+      // screen pixel back through this inverse to evaluate the ramp.
+      const screenToLocal = invert(screenMat) ?? IDENTITY;
 
       // Fill (also the default when a path has neither fill nor stroke).
       if (path.fill || !path.stroke) {
         const bounds = pathBounds(screenPath);
         const edges = pathEdges(screenPath);
         if (bounds && edges.length > 0) {
-          const color = path.fill?.type === 'solid' ? path.fill.color : DEFAULT_FILL;
+          const paint: Paint = path.fill ?? { type: 'solid', color: DEFAULT_FILL };
           commands.push({
             op: 'draw-path',
             nodeId: id,
-            color,
+            paint,
+            screenToLocal,
             fillRule: path.fillRule ?? 'nonzero',
             opacity,
             blend,
@@ -166,7 +176,9 @@ export function buildRenderList(doc: SceneDocument, camera: Camera): RenderComma
       }
 
       // Stroke: convert the outline (screen-space width) and fill it nonzero.
-      if (path.stroke && path.stroke.paint.type === 'solid') {
+      // The stroke's paint (solid or gradient) stays in local space, so it uses
+      // the same `screenToLocal` as the fill.
+      if (path.stroke) {
         const s = path.stroke;
         const det = screenMat.a * screenMat.d - screenMat.b * screenMat.c;
         const scaleFactor = Math.sqrt(Math.abs(det)) || 1;
@@ -182,7 +194,8 @@ export function buildRenderList(doc: SceneDocument, camera: Camera): RenderComma
           commands.push({
             op: 'draw-path',
             nodeId: id,
-            color: s.paint.color,
+            paint: s.paint,
+            screenToLocal,
             fillRule: 'nonzero',
             opacity,
             blend,

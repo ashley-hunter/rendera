@@ -77,3 +77,29 @@ Build vector fills on **exact-quadratic analytic coverage**:
   compositor.
 - Cubic→quadratic conversion introduces a bounded, sub-pixel, curve-preserving
   approximation — not visible faceting.
+
+## Follow-up: gradient paints
+
+The tagged `Fill` (now `Paint`) extends beyond `solid` to `linear`, `radial`
+(two-circle / focal), and `conic` gradients, decided as follows:
+
+- **Analytic, not baked.** The gradient parameter `t` is computed per pixel in
+  the same `PATH_SHADER` that already owns coverage — projecting onto the axis
+  (linear), solving the two-circle cone equation (radial), or an `atan2` sweep
+  (conic). No ramp texture: gradients stay band-free and resolution-independent
+  at any zoom, and cost one small storage buffer of colour stops shared by all
+  path draws (no per-gradient texture).
+- **Authored in local space.** Gradient geometry lives in the shape's local
+  space; the render list passes the `screen → local` affine and the shader maps
+  each pixel back through it before evaluating `t`. A gradient therefore
+  transforms *exactly* with its shape under any affine — rotate and it rotates,
+  scale non-uniformly and it shears — matching Illustrator/Photoshop.
+- **Interpolation space is a per-gradient choice.** Default is linear-light RGB
+  (physically correct, matches the premultiplied pipeline); `oklab` is opt-in
+  for perceptually-even hue ramps with no muddy midpoint (CSS Color 4 direction).
+- **Full multi-stop + spread.** N stops at arbitrary offsets with `pad` /
+  `repeat` / `reflect` spread, mirroring SVG/Canvas. Stops interpolate straight
+  colour + alpha, then premultiply — halo-free like solid fills.
+- **Fill and stroke share it.** A stroke's paint is a `Paint` too, so a single
+  path can carry a gradient fill and an independent gradient stroke; both flow
+  through the same analytic draw-path command.

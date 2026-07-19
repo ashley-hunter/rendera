@@ -535,6 +535,68 @@ describe('WebGpuRenderer colour pipeline', () => {
     expect(pixel(rb, 32, 32).r).toBeLessThan(20);
   });
 
+  it('paints a linear gradient across a path (red -> blue, band-free)', async () => {
+    const doc = SceneDocument.create({ idFactory: createSequentialIdFactory('n') });
+    doc.insert<PathNode>({
+      type: 'path',
+      name: 'grad',
+      path: rectPath(0, 0, 64, 64),
+      fill: {
+        type: 'linear-gradient',
+        start: vec2(0, 32),
+        end: vec2(64, 32),
+        stops: [
+          { offset: 0, color: { r: 1, g: 0, b: 0, a: 1 } },
+          { offset: 1, color: { r: 0, g: 0, b: 1, a: 1 } },
+        ],
+      },
+    });
+    const renderer = await WebGpuRenderer.create(makeCanvas(64), { colorSpace: 'srgb', dither: false });
+    renderer.setClearColor({ r: 0, g: 0, b: 0, a: 1 });
+    renderer.setRenderList(buildRenderList(doc, createCamera()));
+    const rb = await renderer.readback();
+
+    const left = pixel(rb, 2, 32);
+    const right = pixel(rb, 61, 32);
+    const mid = pixel(rb, 32, 32);
+    // Left end is red, right end is blue.
+    expect(left.r).toBeGreaterThan(200);
+    expect(left.r - left.b).toBeGreaterThan(100);
+    expect(right.b).toBeGreaterThan(200);
+    expect(right.b - right.r).toBeGreaterThan(100);
+    // Midpoint mixes 50/50 in linear light -> ~188 in each of R and B.
+    const half = encode8(linearToSrgb(0.5));
+    expect(near(mid.r, half)).toBe(true);
+    expect(near(mid.b, half)).toBe(true);
+    expect(mid.g).toBeLessThan(10);
+  });
+
+  it('paints a radial gradient (bright centre, dark rim)', async () => {
+    const doc = SceneDocument.create({ idFactory: createSequentialIdFactory('n') });
+    doc.insert<PathNode>({
+      type: 'path',
+      name: 'radial',
+      path: rectPath(0, 0, 64, 64),
+      fill: {
+        type: 'radial-gradient',
+        start: { center: vec2(32, 32), radius: 0 },
+        end: { center: vec2(32, 32), radius: 32 },
+        stops: [
+          { offset: 0, color: { r: 1, g: 1, b: 1, a: 1 } },
+          { offset: 1, color: { r: 0, g: 0, b: 0, a: 1 } },
+        ],
+      },
+    });
+    const renderer = await WebGpuRenderer.create(makeCanvas(64), { colorSpace: 'srgb', dither: false });
+    renderer.setClearColor({ r: 0, g: 0, b: 0, a: 1 });
+    renderer.setRenderList(buildRenderList(doc, createCamera()));
+    const rb = await renderer.readback();
+
+    // The centre is (near) white; a point ~2/3 out toward the rim is much darker.
+    expect(pixel(rb, 32, 32).r).toBeGreaterThan(230);
+    expect(pixel(rb, 53, 32).r).toBeLessThan(pixel(rb, 32, 32).r - 60);
+  });
+
   // NOTE: the on-screen canvas *swapchain* present cannot be verified here —
   // SwiftShader (the headless software adapter) does not produce readable/
   // compositable canvas pixels. The render pipeline itself is proven by the

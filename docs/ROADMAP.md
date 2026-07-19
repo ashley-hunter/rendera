@@ -113,9 +113,8 @@ so backend tests do **pixel readback** to assert colour correctness.
   Loop–Blinn implicit + derivative-coverage method on WebGPU: the AA rim scales
   with perimeter (~2×), not area (~4×) — a constant ~1px analytic edge.
 - ✅ **Path/shape model:** generic `path` node (line/quadratic/cubic/close) with a
-  tagged fill + winding rule, primitive helpers (rect, ellipse, rounded-rect,
-  polygon), cubic→quadratic conversion, hit-testing. **Solid fills** ship now;
-  gradients (linear/OKLab), strokes, and boolean ops are follow-ups.
+  tagged paint (`solid` + gradients) + winding rule, primitive helpers (rect,
+  ellipse, rounded-rect, polygon), cubic→quadratic conversion, hit-testing.
 - ✅ **Analytic fill rasterizer:** per-pixel winding (nonzero / even-odd) + exact
   distance to line/quadratic edges for a resolution-independent ~1px AA rim,
   modulating a linear fill, composited through the backdrop-read compositor (so
@@ -125,8 +124,14 @@ so backend tests do **pixel readback** to assert colour correctness.
   butt/round/square caps, unioned via nonzero and filled by the analytic
   rasterizer (so strokes inherit resolution-independent AA). A path can carry a
   fill and a stroke. *(Variable width and dashes are follow-ups.)*
+- ✅ **Gradients:** analytic linear / radial (two-circle, focal) / conic paints,
+  evaluated per-pixel in the path shader (no ramp texture) so they stay band-free
+  and resolution-independent at any zoom. Multi-stop, `pad`/`repeat`/`reflect`
+  spread, and per-gradient linear-light **or OKLab** interpolation. Authored in
+  local space, so a gradient transforms exactly with its shape; fills and strokes
+  both carry it. (ADR 0007 follow-up.) *(Boolean ops still to come.)*
 - ⬜ **Text:** MSDF atlas for zoomable UI text + a high-quality path for large/display type.
-- ⬜ **Gradients & boolean ops.**
+- ⬜ **Boolean ops** (union / intersect / difference on paths).
 
 ## Phase 6 — Effects & non-destructive stack  ⬜  → `@rendera/effects`
 

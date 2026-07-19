@@ -10,7 +10,15 @@
  * it. Tiling, real fills, and blend modes are later slices.
  */
 
-import { blendModeIndex, type RenderCommand } from '@rendera/core';
+import {
+  blendModeIndex,
+  normalizedStops,
+  paintKind,
+  spreadIndex,
+  type Gradient,
+  type Paint,
+  type RenderCommand,
+} from '@rendera/core';
 import { blueNoiseTile, BLUE_NOISE_SIZE } from './blue-noise';
 
 /** A decoded image source the renderer can upload (browser image types). */
@@ -348,13 +356,34 @@ struct Viewport { size : vec2f, scale : f32, _pad : f32 };
 
 struct Edge { a : vec2f, b : vec2f, c : vec2f, kind : vec2f };
 @group(1) @binding(0) var<storage, read> edges : array<Edge>;
-struct PathParams { color : vec4f, bbox : vec4f, counts : vec4u, misc : vec4f };
+// color: solid-paint colour (paint kind 0). grad0/grad1: gradient geometry in
+// local space — linear (p0.xy, p1.xy); radial (c0.xy, r0, r1) + (c1.xy); conic
+// (center.xy, angle). inv0/inv1: the screen->local affine (a,b,c,d)+(e,f) that
+// maps a display pixel back to gradient space. grad: (stopBase, stopCount,
+// spread, interp). counts.w is the paint kind (0 solid, 1 linear, 2 radial,
+// 3 conic).
+struct PathParams {
+  color : vec4f,
+  bbox : vec4f,
+  counts : vec4u,
+  misc : vec4f,
+  grad0 : vec4f,
+  grad1 : vec4f,
+  inv0 : vec4f,
+  inv1 : vec4f,
+  grad : vec4u,
+};
 @group(1) @binding(1) var<uniform> pp : PathParams;
 // Row-band acceleration: bandTable[bandTableOffset + row] = (indexOffset, count)
 // into edgeIndex, which lists the edges whose y-range touches that horizontal
 // band. A pixel only tests its own band's edges.
 @group(1) @binding(2) var<storage, read> bandTable : array<vec2u>;
 @group(1) @binding(3) var<storage, read> edgeIndex : array<u32>;
+// Gradient colour stops, in linear-light. stop.color = rgba; stop.info.x = the
+// stop's offset in [0,1]. Each path draw owns the contiguous run
+// [grad.x, grad.x + grad.y).
+struct GradStop { color : vec4f, info : vec4f };
+@group(1) @binding(4) var<storage, read> stops : array<GradStop>;
 
 @vertex fn vs(@location(0) corner : vec2f) -> @builtin(position) vec4f {
   let pad = 2.0; // device px, so the AA rim is never clipped by the bbox quad
@@ -444,6 +473,123 @@ fn windQuad(p : vec2f, A : vec2f, B : vec2f, C : vec2f) -> i32 {
   return w;
 }
 
+// --- gradient evaluation (linear-light; OKLab optional) ---
+fn linearToOklab(c : vec3f) -> vec3f {
+  let l = 0.4122214708 * c.r + 0.5363325363 * c.g + 0.0514459929 * c.b;
+  let m = 0.2119034982 * c.r + 0.6806995451 * c.g + 0.1073969566 * c.b;
+  let s = 0.0883024619 * c.r + 0.2817188376 * c.g + 0.6299787005 * c.b;
+  let l_ = pow(max(l, 0.0), 1.0 / 3.0);
+  let m_ = pow(max(m, 0.0), 1.0 / 3.0);
+  let s_ = pow(max(s, 0.0), 1.0 / 3.0);
+  return vec3f(
+    0.2104542553 * l_ + 0.7936177850 * m_ - 0.0040720468 * s_,
+    1.9779984951 * l_ - 2.4285922050 * m_ + 0.4505937099 * s_,
+    0.0259040371 * l_ + 0.7827717662 * m_ - 0.8086757660 * s_
+  );
+}
+fn oklabToLinear(c : vec3f) -> vec3f {
+  let l_ = c.x + 0.3963377774 * c.y + 0.2158037573 * c.z;
+  let m_ = c.x - 0.1055613458 * c.y - 0.0638541728 * c.z;
+  let s_ = c.x - 0.0894841775 * c.y - 1.2914855480 * c.z;
+  let l = l_ * l_ * l_;
+  let m = m_ * m_ * m_;
+  let s = s_ * s_ * s_;
+  return vec3f(
+    4.0767416621 * l - 3.3077115913 * m + 0.2309699292 * s,
+    -1.2684380046 * l + 2.6097574011 * m - 0.3413193965 * s,
+    -0.0041960863 * l - 0.7034186147 * m + 1.7076147010 * s
+  );
+}
+
+// Ramp colour at t in [0,1], interpolating between the two bracketing stops in
+// the run [base, base+count). interp 1 mixes through OKLab; else linear-light.
+fn rampColor(t : f32, base : u32, count : u32, interp : u32) -> vec4f {
+  if (count == 0u) { return vec4f(1.0); }
+  if (count == 1u) { return stops[base].color; }
+  let last = base + count - 1u;
+  var hi = base + 1u;
+  loop {
+    if (hi >= last) { break; }
+    if (stops[hi].info.x >= t) { break; }
+    hi = hi + 1u;
+  }
+  let a = stops[hi - 1u];
+  let b = stops[hi];
+  let span = b.info.x - a.info.x;
+  var f = 0.0;
+  if (span > 1e-6) { f = clamp((t - a.info.x) / span, 0.0, 1.0); }
+  let alpha = mix(a.color.a, b.color.a, f);
+  if (interp == 1u) {
+    let rgb = oklabToLinear(mix(linearToOklab(a.color.rgb), linearToOklab(b.color.rgb), f));
+    return vec4f(rgb, alpha);
+  }
+  return vec4f(mix(a.color.rgb, b.color.rgb, f), alpha);
+}
+
+// Map t through the spread mode: 0 pad (clamp), 1 repeat, 2 reflect.
+fn applySpread(t : f32, spread : u32) -> f32 {
+  if (spread == 1u) { return fract(t); }
+  if (spread == 2u) {
+    let u = fract(t * 0.5) * 2.0;
+    return select(u, 2.0 - u, u > 1.0);
+  }
+  return clamp(t, 0.0, 1.0);
+}
+
+// Radial gradient parameter for a local point, two-circle model. Returns the
+// largest t whose interpolated radius is non-negative; 1 (end stop) if none.
+fn radialT(pt : vec2f) -> f32 {
+  let c0 = pp.grad0.xy;
+  let r0 = pp.grad0.z;
+  let r1 = pp.grad0.w;
+  let cd = pp.grad1.xy - c0;
+  let dr = r1 - r0;
+  let pc = pt - c0;
+  let A = dot(cd, cd) - dr * dr;
+  let B = dot(pc, cd) + r0 * dr;
+  let C = dot(pc, pc) - r0 * r0;
+  if (abs(A) < 1e-7) {
+    if (abs(B) < 1e-12) { return 1.0; }
+    let t = C / (2.0 * B);
+    if (r0 + t * dr >= 0.0) { return t; }
+    return 1.0;
+  }
+  let disc = B * B - A * C;
+  if (disc < 0.0) { return 1.0; }
+  let s = sqrt(disc);
+  let ta = (B + s) / A;
+  let tb = (B - s) / A;
+  var best = -1e9;
+  var found = false;
+  if (r0 + ta * dr >= 0.0) { best = ta; found = true; }
+  if (r0 + tb * dr >= 0.0 && tb > best) { best = tb; found = true; }
+  if (found) { return best; }
+  return 1.0;
+}
+
+// Resolve the paint colour (solid or gradient) at a display-pixel position.
+fn paintColor(p : vec2f) -> vec4f {
+  let kind = pp.counts.w;
+  if (kind == 0u) { return pp.color; }
+  // Map the pixel back to gradient (local) space via the screen->local affine.
+  let local = vec2f(
+    pp.inv0.x * p.x + pp.inv0.z * p.y + pp.inv1.x,
+    pp.inv0.y * p.x + pp.inv0.w * p.y + pp.inv1.y
+  );
+  var t = 0.0;
+  if (kind == 1u) {
+    let d = pp.grad0.zw - pp.grad0.xy;
+    t = dot(local - pp.grad0.xy, d) / max(dot(d, d), 1e-8);
+  } else if (kind == 2u) {
+    t = radialT(local);
+  } else {
+    let c = pp.grad0.xy;
+    t = fract((atan2(local.y - c.y, local.x - c.x) - pp.grad0.z) / 6.28318530718);
+  }
+  t = applySpread(t, pp.grad.z);
+  return rampColor(t, pp.grad.x, pp.grad.y, pp.grad.w);
+}
+
 @fragment fn fs(@builtin(position) frag : vec4f) -> @location(0) vec4f {
   let p = frag.xy / vp.scale; // target px -> device px (edge space)
   // Pick this pixel's horizontal band and iterate only its edges.
@@ -474,8 +620,9 @@ fn windQuad(p : vec2f, A : vec2f, B : vec2f, C : vec2f) -> i32 {
   if (pp.counts.x == 1u) { inside = (winding & 1) != 0; }
   let signed = select(dist, -dist, inside);
   let coverage = clamp(0.5 - signed, 0.0, 1.0); // ~1 device-px analytic rim
-  let alpha = pp.color.a * pp.misc.x * coverage;
-  return vec4f(pp.color.rgb * alpha, alpha); // premultiplied linear
+  let paint = paintColor(p);
+  let alpha = paint.a * pp.misc.x * coverage;
+  return vec4f(paint.rgb * alpha, alpha); // premultiplied linear
 }
 `;
 
@@ -516,6 +663,8 @@ export class WebGpuRenderer {
   private pathParamsBuffer: GPUBuffer;
   private pathParamsSlots = 0;
   private pathDraws: PathDraw[] = [];
+  /** Gradient colour stops (linear-light), shared across all path draws. */
+  private gradStopsBuffer: GPUBuffer | null = null;
 
   private readonly imageCache = new Map<string, CachedImage>();
 
@@ -807,6 +956,7 @@ export class WebGpuRenderer {
         { binding: 1, visibility: GPUShaderStage.VERTEX | GPUShaderStage.FRAGMENT, buffer: { type: 'uniform' } },
         { binding: 2, visibility: GPUShaderStage.FRAGMENT, buffer: { type: 'read-only-storage' } },
         { binding: 3, visibility: GPUShaderStage.FRAGMENT, buffer: { type: 'read-only-storage' } },
+        { binding: 4, visibility: GPUShaderStage.FRAGMENT, buffer: { type: 'read-only-storage' } },
       ],
     });
     const pathPipeline = device.createRenderPipeline({
@@ -1044,12 +1194,18 @@ export class WebGpuRenderer {
     this.ensureBlendParams(blendOps);
   }
 
-  /** Pack per-path-draw uniforms (color, bbox, counts, opacity) into 256B slots. */
+  /**
+   * Pack per-path-draw uniforms into 256B slots — coverage bbox, band table,
+   * opacity, and the paint: a flat colour, or a gradient's local-space geometry
+   * plus the screen->local matrix and its stop run. Gradient stops for every
+   * draw are concatenated into one shared storage buffer.
+   */
   private packPathParams(commands: readonly RenderCommand[]): void {
     this.ensurePathParams(this.pathDraws.length);
     const buf = new ArrayBuffer(this.pathDraws.length * 256);
     const f32 = new Float32Array(buf);
     const u32 = new Uint32Array(buf);
+    const stopData: number[] = []; // GradStop = vec4 color + vec4 meta (offset)
     let draw = 0;
     for (const cmd of commands) {
       if (cmd.op !== 'draw-path') {
@@ -1057,25 +1213,87 @@ export class WebGpuRenderer {
       }
       const rec = this.pathDraws[draw];
       const o = draw * 64; // 256 bytes / 4
-      f32[o] = cmd.color.r;
-      f32[o + 1] = cmd.color.g;
-      f32[o + 2] = cmd.color.b;
-      f32[o + 3] = cmd.color.a;
       f32[o + 4] = cmd.bounds.minX;
       f32[o + 5] = cmd.bounds.minY;
       f32[o + 6] = cmd.bounds.maxX;
       f32[o + 7] = cmd.bounds.maxY;
-      // counts = (fillRule, bandTableOffset, bandCount, _)
+      // counts = (fillRule, bandTableOffset, bandCount, paintKind)
       u32[o + 8] = cmd.fillRule === 'evenodd' ? 1 : 0;
       u32[o + 9] = rec.bandTableOffset;
       u32[o + 10] = rec.bandCount;
+      u32[o + 11] = paintKind(cmd.paint);
       // misc = (opacity, bandMinY, bandH, _)
       f32[o + 12] = cmd.opacity;
       f32[o + 13] = rec.bandMinY;
       f32[o + 14] = rec.bandH;
+      this.packPaint(cmd.paint, cmd.screenToLocal, f32, u32, o, stopData);
       draw++;
     }
     this.device.queue.writeBuffer(this.pathParamsBuffer, 0, buf);
+
+    const stops = new Float32Array(stopData.length > 0 ? stopData : [0, 0, 0, 0, 0, 0, 0, 0]);
+    this.gradStopsBuffer = this.ensureStorageBuffer(this.gradStopsBuffer, stops.byteLength, 'grad-stops');
+    this.device.queue.writeBuffer(this.gradStopsBuffer, 0, stops);
+  }
+
+  /**
+   * Write a paint into a path-param slot: the solid colour, or a gradient's
+   * geometry (grad0/grad1, local space), the screen->local affine (inv0/inv1),
+   * and its stop-run descriptor (grad). Appends the gradient's stops to
+   * `stopData`.
+   */
+  private packPaint(
+    paint: Paint,
+    screenToLocal: { a: number; b: number; c: number; d: number; e: number; f: number },
+    f32: Float32Array,
+    u32: Uint32Array,
+    o: number,
+    stopData: number[]
+  ): void {
+    if (paint.type === 'solid') {
+      f32[o] = paint.color.r;
+      f32[o + 1] = paint.color.g;
+      f32[o + 2] = paint.color.b;
+      f32[o + 3] = paint.color.a;
+      return;
+    }
+    // grad0 / grad1: geometry in local space (see the shader's PathParams docs).
+    if (paint.type === 'linear-gradient') {
+      f32[o + 16] = paint.start.x;
+      f32[o + 17] = paint.start.y;
+      f32[o + 18] = paint.end.x;
+      f32[o + 19] = paint.end.y;
+    } else if (paint.type === 'radial-gradient') {
+      f32[o + 16] = paint.start.center.x;
+      f32[o + 17] = paint.start.center.y;
+      f32[o + 18] = paint.start.radius;
+      f32[o + 19] = paint.end.radius;
+      f32[o + 20] = paint.end.center.x;
+      f32[o + 21] = paint.end.center.y;
+    } else {
+      f32[o + 16] = paint.center.x;
+      f32[o + 17] = paint.center.y;
+      f32[o + 18] = paint.angle ?? 0;
+    }
+    // inv0 = (a,b,c,d), inv1 = (e,f): the screen->local affine.
+    const m = screenToLocal;
+    f32[o + 24] = m.a;
+    f32[o + 25] = m.b;
+    f32[o + 26] = m.c;
+    f32[o + 27] = m.d;
+    f32[o + 28] = m.e;
+    f32[o + 29] = m.f;
+    // grad = (stopBase, stopCount, spread, interp)
+    const g = paint as Gradient;
+    const stops = normalizedStops(g.stops);
+    const base = stopData.length / 8;
+    u32[o + 32] = base;
+    u32[o + 33] = stops.length;
+    u32[o + 34] = spreadIndex(g.spread);
+    u32[o + 35] = g.interpolation === 'oklab' ? 1 : 0;
+    for (const s of stops) {
+      stopData.push(s.color.r, s.color.g, s.color.b, s.color.a, s.offset, 0, 0, 0);
+    }
   }
 
   private ensureStorageBuffer(existing: GPUBuffer | null, byteLength: number, label: string): GPUBuffer {
@@ -1186,6 +1404,7 @@ export class WebGpuRenderer {
     this.edgeBuffer?.destroy();
     this.bandTableBuffer?.destroy();
     this.edgeIndexBuffer?.destroy();
+    this.gradStopsBuffer?.destroy();
     this.solidBuffer?.destroy();
     this.imageBuffer?.destroy();
     this.destroyTargetPool();
@@ -1315,16 +1534,17 @@ export class WebGpuRenderer {
       return;
     }
     if (cmd.op === 'draw-path') {
-      if (!this.edgeBuffer || !this.bandTableBuffer || !this.edgeIndexBuffer) {
+      if (!this.edgeBuffer || !this.bandTableBuffer || !this.edgeIndexBuffer || !this.gradStopsBuffer) {
         return;
       }
       const bindGroup = this.device.createBindGroup({
         layout: this.pathResources.layout,
         entries: [
           { binding: 0, resource: { buffer: this.edgeBuffer } },
-          { binding: 1, resource: { buffer: this.pathParamsBuffer, offset: index * 256, size: 64 } },
+          { binding: 1, resource: { buffer: this.pathParamsBuffer, offset: index * 256, size: 144 } },
           { binding: 2, resource: { buffer: this.bandTableBuffer } },
           { binding: 3, resource: { buffer: this.edgeIndexBuffer } },
+          { binding: 4, resource: { buffer: this.gradStopsBuffer } },
         ],
       });
       pass.setPipeline(this.pathResources.pipeline);

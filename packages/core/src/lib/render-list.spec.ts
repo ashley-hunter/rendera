@@ -95,13 +95,38 @@ describe('buildRenderList', () => {
     expect(cmd.op).toBe('draw-path');
     if (cmd.op !== 'draw-path') throw new Error('expected draw-path');
     expect(cmd.nodeId).toBe(node.id);
-    expect(cmd.color).toEqual({ r: 0.1, g: 0.2, b: 0.3, a: 1 });
+    expect(cmd.paint).toEqual({ type: 'solid', color: { r: 0.1, g: 0.2, b: 0.3, a: 1 } });
     expect(cmd.fillRule).toBe('nonzero');
     // Rect (0,0,10,10) translated (5,5), zoom 2 -> screen bbox (10,10)..(30,30).
     expect(cmd.bounds.minX).toBeCloseTo(10, 5);
     expect(cmd.bounds.maxX).toBeCloseTo(30, 5);
     // 3 line segments + 1 close.
     expect(cmd.edges).toHaveLength(4);
+  });
+
+  it('emits a gradient fill with local geometry and a screen->local matrix', () => {
+    const doc = newDoc();
+    doc.insert<PathNode>({
+      type: 'path',
+      name: 'g',
+      path: rectPath(0, 0, 10, 10),
+      fill: {
+        type: 'linear-gradient',
+        start: vec2(0, 0),
+        end: vec2(10, 0),
+        stops: [
+          { offset: 0, color: { r: 1, g: 0, b: 0, a: 1 } },
+          { offset: 1, color: { r: 0, g: 0, b: 1, a: 1 } },
+        ],
+      },
+    });
+    // Zoom 2: local (10,0) maps to screen (20,0); the inverse must undo it.
+    const cmd = buildRenderList(doc, createCamera({ zoom: 2 }))[0];
+    expect(cmd.op).toBe('draw-path');
+    if (cmd.op !== 'draw-path') throw new Error('expected draw-path');
+    expect(cmd.paint.type).toBe('linear-gradient');
+    // screenToLocal maps a screen point back to local space (undoes the zoom).
+    expect(approxEquals(transformPoint(cmd.screenToLocal, vec2(20, 20)), vec2(10, 10))).toBe(true);
   });
 
   it('applies the camera', () => {

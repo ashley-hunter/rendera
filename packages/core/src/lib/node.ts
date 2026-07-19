@@ -13,12 +13,12 @@
  */
 
 import type { BlendMode } from './blend';
+import type { Paint } from './paint';
 import type { FillRule, Path } from './path';
 import type { StrokeCap, StrokeJoin } from './stroke';
 import type { Transform } from './transform';
 import type { OrderKey } from './ordering';
 import type { NodeId } from './id';
-import type { LinearRgba } from './render-list';
 import type { Vec2 } from './vec2';
 
 /** The common shape of every node record. */
@@ -32,9 +32,12 @@ export interface SceneNode {
   index: OrderKey;
 }
 
-/** How a layer's rectangle is painted. A tagged value so gradients/patterns
- * can slot in behind the same field later without a migration. */
-export type Fill = { readonly type: 'solid'; readonly color: LinearRgba };
+/**
+ * How a shape is painted: a flat colour or a gradient (linear / radial / conic).
+ * A tagged value (see `Paint`) so richer paints slot in behind the same field
+ * without a migration.
+ */
+export type Fill = Paint;
 
 /** A path's outline stroke: paint plus width, cap, join, and miter limit. */
 export interface Stroke {

@@ -1,5 +1,6 @@
 import type { Meta, StoryObj } from '@storybook/angular';
 import { createBlendScene } from './blend-scene';
+import { createGradientScene } from './gradient-scene';
 import { createImageSceneSource } from './image-scene';
 import { createVectorScene } from './vector-scene';
 import { WebGpuScene } from './webgpu-scene';
@@ -39,4 +40,16 @@ export const BlendModes: Story = {
  */
 export const Vectors: Story = {
   args: { scene: createVectorScene() },
+};
+
+/**
+ * Gradient paints evaluated analytically in the path shader: multi-stop linear
+ * ramps, a two-circle radial with a focal highlight (glossy sphere), a conic
+ * colour wheel, `repeat` spread (stripes), OKLab vs linear-light interpolation,
+ * and a gradient fill + gradient stroke on one star. Gradients are defined in
+ * each shape's local space, so they transform exactly with it — and stay
+ * band-free at any zoom.
+ */
+export const Gradients: Story = {
+  args: { scene: createGradientScene() },
 };
