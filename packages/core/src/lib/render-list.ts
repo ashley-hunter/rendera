@@ -1,22 +1,26 @@
 /**
- * Render list — a pure projection of the document into flat draw items.
+ * Render command stream — a pure projection of the document into a flat,
+ * back-to-front list of compositing commands (ADR 0004).
  *
- * This is the bridge from the model to a renderer (ADR 0004): a framework- and
- * GPU-agnostic function flattens the scene + camera into a list of quads, each
- * with a screen-space transform (unit square -> screen px) and a linear-light
- * colour, in back-to-front draw order. A renderer just uploads and draws the
- * list. Being pure, it is unit-tested with no GPU.
+ * Rather than a flat list of quads, the document flattens into a small command
+ * stream a compositor can execute with a stack of render targets:
  *
- * Colours are debug colours derived from the node id; a real fill/paint model
- * arrives in a later phase.
+ *   push-group · draw-solid · draw-image · … · pop-group
+ *
+ * A plain group (opacity 1, Normal blend, not explicitly isolated) is
+ * *pass-through*: it emits no push/pop and its children composite straight onto
+ * the backdrop. A group only pushes an isolated target when it must composite
+ * as a unit (opacity < 1, a non-Normal blend, or `isolate`). Hidden nodes emit
+ * nothing. Being pure, this is unit-tested with no GPU.
  */
 
 import { boundsHeight, boundsWidth } from './bounds';
+import type { BlendMode } from './blend';
 import { worldToScreenMatrix, type Camera } from './camera';
 import type { SceneDocument } from './document';
 import type { NodeId } from './id';
 import { compose, fromScaling, fromTranslation, type Mat2D } from './matrix';
-import type { ImageNode } from './node';
+import type { GroupNode, ImageNode, LayerNode, SpatialNode } from './node';
 import { vec2 } from './vec2';
 
 /** A linear-light RGBA colour, components in [0, 1]. */
@@ -27,69 +31,110 @@ export interface LinearRgba {
   readonly a: number;
 }
 
-/** Fields shared by every draw item: a node id and a unit-square -> screen map. */
-interface DrawItemBase {
+/** Fields shared by every draw command. */
+interface DrawBase {
   readonly nodeId: NodeId;
-  /** Maps the unit square [0,1]^2 to screen space (logical px): includes the
-   * node's local geometry, world transform, and the camera. */
+  /** Maps the unit square [0,1]^2 to screen space (logical px): the node's
+   * local geometry, world transform, and the camera composed. */
   readonly transform: Mat2D;
+  /** Layer opacity in [0, 1]. */
+  readonly opacity: number;
+  /** Compositing blend mode. */
+  readonly blend: BlendMode;
 }
 
-/** A flat-coloured quad (the debug-fill / solid case). */
-export interface QuadDrawItem extends DrawItemBase {
-  readonly kind: 'solid';
-  /** Linear-light fill colour. */
+/** Paint a flat-coloured quad. */
+export interface DrawSolidCommand extends DrawBase {
+  readonly op: 'draw-solid';
+  /** Resolved linear-light fill colour. */
   readonly color: LinearRgba;
 }
 
-/** A textured quad, sampling the backend asset referenced by `assetId`. */
-export interface ImageDrawItem extends DrawItemBase {
-  readonly kind: 'image';
-  /** Opaque handle the renderer resolves to a GPU texture. */
+/** Paint a textured quad from the backend asset `assetId`. */
+export interface DrawImageCommand extends DrawBase {
+  readonly op: 'draw-image';
   readonly assetId: string;
-  /** Layer opacity in [0, 1]. */
-  readonly opacity: number;
 }
 
-/** A single item to draw, back-to-front. */
-export type RenderItem = QuadDrawItem | ImageDrawItem;
+/** Begin an isolated group: draws until the matching pop target a fresh layer. */
+export interface PushGroupCommand {
+  readonly op: 'push-group';
+  readonly nodeId: NodeId;
+  readonly opacity: number;
+  readonly blend: BlendMode;
+}
 
-/** Flatten the drawable nodes of `doc` into screen-space draw items via `camera`. */
-export function buildRenderList(doc: SceneDocument, camera: Camera): RenderItem[] {
-  const items: RenderItem[] = [];
+/** End the current isolated group, compositing it onto the backdrop. */
+export interface PopGroupCommand {
+  readonly op: 'pop-group';
+  readonly nodeId: NodeId;
+}
+
+/** One compositing command, executed in order. */
+export type RenderCommand =
+  | DrawSolidCommand
+  | DrawImageCommand
+  | PushGroupCommand
+  | PopGroupCommand;
+
+/** The fill used for a layer that has none set (opaque mid-grey). */
+const DEFAULT_FILL: LinearRgba = { r: 0.5, g: 0.5, b: 0.5, a: 1 };
+
+/** Flatten the drawable nodes of `doc` into a compositing command stream. */
+export function buildRenderList(doc: SceneDocument, camera: Camera): RenderCommand[] {
+  const commands: RenderCommand[] = [];
   const worldToScreen = worldToScreenMatrix(camera);
 
   const visit = (id: NodeId): void => {
-    const local = doc.getLocalBounds(id);
-    if (local) {
-      // unit square -> local rect -> world -> screen.
-      const localFromUnit = compose(
-        fromTranslation(vec2(local.minX, local.minY)),
-        fromScaling(vec2(boundsWidth(local), boundsHeight(local)))
-      );
-      const transform = compose(worldToScreen, doc.getWorldMatrix(id), localFromUnit);
-      const node = doc.get(id);
-      if (node?.type === 'image') {
-        const image = node as ImageNode;
-        items.push({
-          kind: 'image',
-          nodeId: id,
-          transform,
-          assetId: image.assetId,
-          opacity: image.opacity ?? 1,
-        });
-      } else {
-        items.push({ kind: 'solid', nodeId: id, transform, color: debugColorForId(id) });
-      }
+    const node = doc.get(id) as SpatialNode | undefined;
+    if (!node || node.visible === false) {
+      return; // missing, or a hidden node/subtree
     }
-    for (const child of doc.getChildren(id)) {
-      visit(child.id);
+    const opacity = node.opacity ?? 1;
+    const blend: BlendMode = node.blendMode ?? 'normal';
+
+    if (node.type === 'group') {
+      const group = node as GroupNode;
+      const isolated = group.isolate === true || opacity < 1 || blend !== 'normal';
+      if (isolated) {
+        commands.push({ op: 'push-group', nodeId: id, opacity, blend });
+        for (const child of doc.getChildren(id)) {
+          visit(child.id);
+        }
+        commands.push({ op: 'pop-group', nodeId: id });
+      } else {
+        for (const child of doc.getChildren(id)) {
+          visit(child.id);
+        }
+      }
+      return;
+    }
+
+    const local = doc.getLocalBounds(id);
+    if (!local) {
+      return;
+    }
+    // unit square -> local rect -> world -> screen.
+    const localFromUnit = compose(
+      fromTranslation(vec2(local.minX, local.minY)),
+      fromScaling(vec2(boundsWidth(local), boundsHeight(local)))
+    );
+    const transform = compose(worldToScreen, doc.getWorldMatrix(id), localFromUnit);
+
+    if (node.type === 'image') {
+      const image = node as ImageNode;
+      commands.push({ op: 'draw-image', nodeId: id, transform, assetId: image.assetId, opacity, blend });
+    } else {
+      const layer = node as LayerNode;
+      const color = layer.fill?.type === 'solid' ? layer.fill.color : DEFAULT_FILL;
+      commands.push({ op: 'draw-solid', nodeId: id, transform, color, opacity, blend });
     }
   };
+
   for (const child of doc.getChildren(doc.root.id)) {
     visit(child.id);
   }
-  return items;
+  return commands;
 }
 
 /** A deterministic, pleasant debug colour for a node id (linear RGBA). */

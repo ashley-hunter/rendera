@@ -10,7 +10,7 @@
  * it. Tiling, real fills, and blend modes are later slices.
  */
 
-import type { ImageDrawItem, RenderItem } from '@rendera/core';
+import { blendModeIndex, type RenderCommand } from '@rendera/core';
 import { blueNoiseTile, BLUE_NOISE_SIZE } from './blue-noise';
 
 /** A decoded image source the renderer can upload (browser image types). */
@@ -29,6 +29,19 @@ interface ImageResources {
 interface CachedImage {
   texture: GPUTexture;
   bindGroup: GPUBindGroup;
+}
+
+/** GPU resources for the backdrop-read blend/composite pass. */
+interface CompositorResources {
+  pipeline: GPURenderPipeline;
+  layout: GPUBindGroupLayout;
+}
+
+/** A layer target on the compositing stack, with the group's compositing props. */
+interface StackEntry {
+  tex: GPUTexture;
+  opacity: number;
+  mode: number;
 }
 
 export interface RendererColor {
@@ -224,6 +237,89 @@ struct VOut { @builtin(position) pos : vec4f, @location(0) uv : vec2f };
 }
 `;
 
+// Backdrop-read compositor: blend a source layer over the running composite per
+// W3C Compositing-1, in linear premultiplied light. Full-screen pass that
+// ping-pongs into a fresh target. `mode` indexes @rendera/core's BLEND_MODES.
+const BLEND_SHADER = /* wgsl */ `
+@group(0) @binding(0) var backdropTex : texture_2d<f32>;
+@group(0) @binding(1) var sourceTex : texture_2d<f32>;
+struct Blend { mode : f32, opacity : f32, _p0 : f32, _p1 : f32 };
+@group(0) @binding(2) var<uniform> bp : Blend;
+
+@vertex fn vs(@builtin(vertex_index) i : u32) -> @builtin(position) vec4f {
+  var p = array<vec2f, 3>(vec2f(-1.0, -1.0), vec2f(3.0, -1.0), vec2f(-1.0, 3.0));
+  return vec4f(p[i], 0.0, 1.0);
+}
+
+fn lum(c : vec3f) -> f32 { return 0.3 * c.r + 0.59 * c.g + 0.11 * c.b; }
+fn sat3(c : vec3f) -> f32 { return max(max(c.r, c.g), c.b) - min(min(c.r, c.g), c.b); }
+fn clipColor(c : vec3f) -> vec3f {
+  let l = lum(c);
+  let n = min(min(c.r, c.g), c.b);
+  let x = max(max(c.r, c.g), c.b);
+  var col = c;
+  if (n < 0.0) { col = l + (col - l) * (l / (l - n)); }
+  if (x > 1.0) { col = l + (col - l) * ((1.0 - l) / (x - l)); }
+  return col;
+}
+fn setLum(c : vec3f, l : f32) -> vec3f { return clipColor(c + vec3f(l - lum(c))); }
+fn setSat(c : vec3f, s : f32) -> vec3f {
+  let mn = min(min(c.r, c.g), c.b);
+  let mx = max(max(c.r, c.g), c.b);
+  if (mx > mn) { return (c - mn) / (mx - mn) * s; }
+  return vec3f(0.0);
+}
+
+fn sep(mode : i32, cb : f32, cs : f32) -> f32 {
+  switch mode {
+    case 1: { return cb * cs; }
+    case 2: { return cb + cs - cb * cs; }
+    case 3: { if (cb <= 0.5) { return 2.0 * cb * cs; } return 1.0 - 2.0 * (1.0 - cb) * (1.0 - cs); }
+    case 4: { return min(cb, cs); }
+    case 5: { return max(cb, cs); }
+    case 6: { if (cb <= 0.0) { return 0.0; } if (cs >= 1.0) { return 1.0; } return min(1.0, cb / (1.0 - cs)); }
+    case 7: { if (cb >= 1.0) { return 1.0; } if (cs <= 0.0) { return 0.0; } return 1.0 - min(1.0, (1.0 - cb) / cs); }
+    case 8: { if (cs <= 0.5) { return 2.0 * cb * cs; } return 1.0 - 2.0 * (1.0 - cb) * (1.0 - cs); }
+    case 9: {
+      if (cs <= 0.5) { return cb - (1.0 - 2.0 * cs) * cb * (1.0 - cb); }
+      var d : f32;
+      if (cb <= 0.25) { d = ((16.0 * cb - 12.0) * cb + 4.0) * cb; } else { d = sqrt(cb); }
+      return cb + (2.0 * cs - 1.0) * (d - cb);
+    }
+    case 10: { return abs(cb - cs); }
+    case 11: { return cb + cs - 2.0 * cb * cs; }
+    default: { return cs; }
+  }
+}
+
+fn blendColor(mode : i32, Cb : vec3f, Cs : vec3f) -> vec3f {
+  switch mode {
+    case 12: { return setLum(setSat(Cs, sat3(Cb)), lum(Cb)); }
+    case 13: { return setLum(setSat(Cb, sat3(Cs)), lum(Cb)); }
+    case 14: { return setLum(Cs, lum(Cb)); }
+    case 15: { return setLum(Cb, lum(Cs)); }
+    default: { return vec3f(sep(mode, Cb.r, Cs.r), sep(mode, Cb.g, Cs.g), sep(mode, Cb.b, Cs.b)); }
+  }
+}
+
+@fragment fn fs(@builtin(position) frag : vec4f) -> @location(0) vec4f {
+  let coord = vec2i(frag.xy);
+  let cb = textureLoad(backdropTex, coord, 0); // premultiplied linear backdrop
+  let cs = textureLoad(sourceTex, coord, 0);   // premultiplied linear source
+  let alphaB = cb.a;
+  let alphaS = cs.a * bp.opacity;
+  var Cb = vec3f(0.0);
+  if (cb.a > 0.0) { Cb = cb.rgb / cb.a; }
+  var Cs = vec3f(0.0);
+  if (cs.a > 0.0) { Cs = cs.rgb / cs.a; }
+  let B = blendColor(i32(bp.mode), Cb, Cs);
+  // W3C Compositing-1 source-over with blend function B, premultiplied result.
+  let co = alphaS * (1.0 - alphaB) * Cs + alphaS * alphaB * B + alphaB * (1.0 - alphaS) * Cb;
+  let ao = alphaS + alphaB * (1.0 - alphaS);
+  return vec4f(co, ao);
+}
+`;
+
 const SCENE_FORMAT: GPUTextureFormat = 'rgba16float';
 const IMAGE_FORMAT: GPUTextureFormat = 'rgba8unorm-srgb';
 
@@ -236,17 +332,24 @@ export class WebGpuRenderer {
   /** Effective (clamped) supersample factor actually in use. */
   private sampleScale = 1;
   private ditherEnabled = false;
-  private sceneTarget: GPUTexture;
-  private presentBindGroup: GPUBindGroup;
 
-  private instanceBuffer: GPUBuffer | null = null;
-  private instanceCapacity = 0;
-  private instanceCount = 0;
+  /** The compositing command stream (set by `setRenderList`). */
+  private commands: readonly RenderCommand[] = [];
+  /** Per-draw-solid instance data (10 floats: transform + premultiplied rgba). */
+  private solidBuffer: GPUBuffer | null = null;
+  private solidCount = 0;
+  /** Per-draw-image instance data (8 floats: transform + opacity). */
+  private imageBuffer: GPUBuffer | null = null;
+  private imageDrawCount = 0;
+  /** Uniform slots (256B each) for per-op blend params. */
+  private blendParamsBuffer: GPUBuffer;
+  private blendParamsSlots = 0;
+
+  /** Pool of layer-sized targets reused across frames. */
+  private readonly targetPool: GPUTexture[] = [];
+  private targetFree: GPUTexture[] = [];
 
   private readonly imageCache = new Map<string, CachedImage>();
-  private imageInstanceBuffer: GPUBuffer | null = null;
-  private imageInstanceCapacity = 0;
-  private imageDraws: readonly ImageDrawItem[] = [];
 
   private constructor(
     private readonly device: GPUDevice,
@@ -262,6 +365,7 @@ export class WebGpuRenderer {
     private readonly unitQuadBuffer: GPUBuffer,
     private readonly noiseTexture: GPUTexture,
     private readonly image: ImageResources,
+    private readonly compositor: CompositorResources,
     width: number,
     height: number,
     supersample: number
@@ -269,8 +373,12 @@ export class WebGpuRenderer {
     this.width = width;
     this.height = height;
     this.supersample = Math.max(1, Math.floor(supersample));
-    this.sceneTarget = this.createSceneTarget();
-    this.presentBindGroup = this.createPresentBindGroup();
+    this.sampleScale = this.computeScale();
+    this.blendParamsBuffer = this.device.createBuffer({
+      size: 256,
+      usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+    });
+    this.blendParamsSlots = 1;
     this.updateViewport();
     this.writeParams();
   }
@@ -469,6 +577,26 @@ export class WebGpuRenderer {
       mipSampler,
     };
 
+    // --- compositor pipeline (backdrop-read blend -> layer target) ---
+    const blendModule = device.createShaderModule({ code: BLEND_SHADER });
+    const blendLayout = device.createBindGroupLayout({
+      entries: [
+        { binding: 0, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'float' } },
+        { binding: 1, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'float' } },
+        { binding: 2, visibility: GPUShaderStage.FRAGMENT, buffer: { type: 'uniform' } },
+      ],
+    });
+    const blendPipeline = device.createRenderPipeline({
+      layout: device.createPipelineLayout({ bindGroupLayouts: [blendLayout] }),
+      vertex: { module: blendModule, entryPoint: 'vs' },
+      fragment: { module: blendModule, entryPoint: 'fs', targets: [{ format: SCENE_FORMAT }] },
+      primitive: { topology: 'triangle-list' },
+    });
+    const compositorResources: CompositorResources = {
+      pipeline: blendPipeline,
+      layout: blendLayout,
+    };
+
     const width = Math.max(1, canvas.width || 1);
     const height = Math.max(1, canvas.height || 1);
 
@@ -486,6 +614,7 @@ export class WebGpuRenderer {
       unitQuadBuffer,
       noiseTexture,
       imageResources,
+      compositorResources,
       width,
       height,
       options.supersample ?? 2
@@ -578,60 +707,50 @@ export class WebGpuRenderer {
     this.writeParams();
   }
 
-  /** Upload the draw list: solid quads (instanced) and textured image quads. */
-  setRenderList(items: readonly RenderItem[]): void {
-    const solids = items.filter((i): i is Extract<RenderItem, { kind: 'solid' }> => i.kind === 'solid');
-    this.imageDraws = items.filter((i): i is ImageDrawItem => i.kind === 'image');
+  /**
+   * Set the compositing command stream. Solids and images are packed into
+   * instance buffers in command order (opacity baked into the source so the
+   * blend pass never re-applies it); blend-param slots are sized to the number
+   * of non-Normal draws plus group pops.
+   */
+  setRenderList(commands: readonly RenderCommand[]): void {
+    this.commands = commands;
 
-    this.instanceCount = solids.length;
-    if (solids.length > 0) {
-      const data = new Float32Array(solids.length * 10);
-      solids.forEach((item, i) => {
-        const o = i * 10;
-        const m = item.transform;
-        data[o] = m.a;
-        data[o + 1] = m.b;
-        data[o + 2] = m.c;
-        data[o + 3] = m.d;
-        data[o + 4] = m.e;
-        data[o + 5] = m.f;
-        data[o + 6] = item.color.r;
-        data[o + 7] = item.color.g;
-        data[o + 8] = item.color.b;
-        data[o + 9] = item.color.a;
-      });
-      this.instanceBuffer = this.ensureBuffer(this.instanceBuffer, data.byteLength, 'instance');
-      this.instanceCapacity = Math.max(this.instanceCapacity, data.byteLength);
-      this.device.queue.writeBuffer(this.instanceBuffer, 0, data);
+    const solids: number[] = [];
+    const images: number[] = [];
+    let blendOps = 0;
+    for (const cmd of commands) {
+      if (cmd.op === 'draw-solid') {
+        const m = cmd.transform;
+        const a = cmd.color.a * cmd.opacity; // bake opacity into premultiplied alpha
+        solids.push(m.a, m.b, m.c, m.d, m.e, m.f, cmd.color.r, cmd.color.g, cmd.color.b, a);
+        if (cmd.blend !== 'normal') blendOps++;
+      } else if (cmd.op === 'draw-image') {
+        const m = cmd.transform;
+        images.push(m.a, m.b, m.c, m.d, m.e, m.f, cmd.opacity, 0);
+        if (cmd.blend !== 'normal') blendOps++;
+      } else if (cmd.op === 'push-group') {
+        blendOps++; // the matching pop composites the group (one blend pass)
+      }
     }
 
-    // Image instance data: transform (m0,m1,m2) + opacity, 8 floats (32 bytes).
-    if (this.imageDraws.length > 0) {
-      const data = new Float32Array(this.imageDraws.length * 8);
-      this.imageDraws.forEach((item, i) => {
-        const o = i * 8;
-        const m = item.transform;
-        data[o] = m.a;
-        data[o + 1] = m.b;
-        data[o + 2] = m.c;
-        data[o + 3] = m.d;
-        data[o + 4] = m.e;
-        data[o + 5] = m.f;
-        data[o + 6] = item.opacity;
-        data[o + 7] = 0;
-      });
-      this.imageInstanceBuffer = this.ensureBuffer(
-        this.imageInstanceBuffer,
-        data.byteLength,
-        'image-instance'
-      );
-      this.imageInstanceCapacity = Math.max(this.imageInstanceCapacity, data.byteLength);
-      this.device.queue.writeBuffer(this.imageInstanceBuffer, 0, data);
+    this.solidCount = solids.length / 10;
+    this.imageDrawCount = images.length / 8;
+    if (this.solidCount > 0) {
+      const data = new Float32Array(solids);
+      this.solidBuffer = this.ensureVertexBuffer(this.solidBuffer, data.byteLength, 'solid');
+      this.device.queue.writeBuffer(this.solidBuffer, 0, data);
     }
+    if (this.imageDrawCount > 0) {
+      const data = new Float32Array(images);
+      this.imageBuffer = this.ensureVertexBuffer(this.imageBuffer, data.byteLength, 'image');
+      this.device.queue.writeBuffer(this.imageBuffer, 0, data);
+    }
+    this.ensureBlendParams(blendOps);
   }
 
   /** Grow a vertex buffer if needed, returning one at least `byteLength` big. */
-  private ensureBuffer(existing: GPUBuffer | null, byteLength: number, label: string): GPUBuffer {
+  private ensureVertexBuffer(existing: GPUBuffer | null, byteLength: number, label: string): GPUBuffer {
     if (existing && existing.size >= byteLength) {
       return existing;
     }
@@ -643,12 +762,25 @@ export class WebGpuRenderer {
     });
   }
 
+  /** Ensure the blend-param uniform buffer has one 256B slot per blend op. */
+  private ensureBlendParams(slots: number): void {
+    const need = Math.max(1, slots);
+    if (need <= this.blendParamsSlots) {
+      return;
+    }
+    this.blendParamsBuffer.destroy();
+    this.blendParamsBuffer = this.device.createBuffer({
+      size: need * 256,
+      usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+    });
+    this.blendParamsSlots = need;
+  }
+
   resize(width: number, height: number): void {
     this.width = Math.max(1, Math.floor(width));
     this.height = Math.max(1, Math.floor(height));
-    this.sceneTarget.destroy();
-    this.sceneTarget = this.createSceneTarget();
-    this.presentBindGroup = this.createPresentBindGroup();
+    this.sampleScale = this.computeScale();
+    this.destroyTargetPool();
     this.updateViewport();
     this.writeParams();
   }
@@ -658,7 +790,8 @@ export class WebGpuRenderer {
       throw new Error('renderer has no canvas context');
     }
     const encoder = this.device.createCommandEncoder();
-    this.encode(encoder, this.context.getCurrentTexture().createView());
+    const composite = this.composite(encoder);
+    this.presentPass(encoder, composite, this.context.getCurrentTexture().createView());
     this.device.queue.submit([encoder.finish()]);
   }
 
@@ -675,7 +808,8 @@ export class WebGpuRenderer {
     });
 
     const encoder = this.device.createCommandEncoder();
-    this.encode(encoder, output.createView());
+    const composite = this.composite(encoder);
+    this.presentPass(encoder, composite, output.createView());
     encoder.copyTextureToBuffer({ texture: output }, { buffer, bytesPerRow }, [this.width, this.height]);
     this.device.queue.submit([encoder.finish()]);
 
@@ -689,71 +823,214 @@ export class WebGpuRenderer {
   }
 
   destroy(): void {
-    this.sceneTarget.destroy();
     this.paramsBuffer.destroy();
     this.viewportBuffer.destroy();
     this.unitQuadBuffer.destroy();
     this.noiseTexture.destroy();
-    this.instanceBuffer?.destroy();
-    this.imageInstanceBuffer?.destroy();
+    this.blendParamsBuffer.destroy();
+    this.solidBuffer?.destroy();
+    this.imageBuffer?.destroy();
+    this.destroyTargetPool();
     for (const { texture } of this.imageCache.values()) {
       texture.destroy();
     }
     this.imageCache.clear();
   }
 
-  private encode(encoder: GPUCommandEncoder, targetView: GPUTextureView): void {
-    // Scene pass: clear to background, draw the quads (premultiplied over).
-    const scenePass = encoder.beginRenderPass({
-      colorAttachments: [
-        {
-          view: this.sceneTarget.createView(),
-          loadOp: 'clear',
-          storeOp: 'store',
-          clearValue: this.background,
-        },
-      ],
-    });
-    if (this.instanceCount > 0 && this.instanceBuffer) {
-      scenePass.setPipeline(this.quadPipeline);
-      scenePass.setBindGroup(0, this.quadBindGroup);
-      scenePass.setVertexBuffer(0, this.unitQuadBuffer);
-      scenePass.setVertexBuffer(1, this.instanceBuffer);
-      scenePass.draw(4, this.instanceCount);
-    }
-    // Image quads: one draw per image (its own texture), selecting its instance
-    // slot via firstInstance. Skips assets that are not yet registered.
-    if (this.imageDraws.length > 0 && this.imageInstanceBuffer) {
-      scenePass.setPipeline(this.image.pipeline);
-      scenePass.setBindGroup(0, this.quadBindGroup);
-      scenePass.setVertexBuffer(0, this.unitQuadBuffer);
-      scenePass.setVertexBuffer(1, this.imageInstanceBuffer);
-      this.imageDraws.forEach((item, i) => {
-        const cached = this.imageCache.get(item.assetId);
-        if (!cached) {
-          return;
-        }
-        scenePass.setBindGroup(1, cached.bindGroup);
-        scenePass.draw(4, 1, 0, i);
-      });
-    }
-    scenePass.end();
+  /**
+   * Execute the command stream into a stack of layer targets, returning the
+   * final root composite (supersampled). Plain "Normal" draws blend onto the
+   * top target with fixed-function `over`; non-Normal draws and group pops read
+   * the backdrop and blend in a shader, ping-ponging into a fresh target.
+   */
+  private composite(encoder: GPUCommandEncoder): GPUTexture {
+    this.targetFree = [...this.targetPool];
 
-    // Present pass: encode linear scene -> display.
-    const present = encoder.beginRenderPass({
-      colorAttachments: [
-        {
-          view: targetView,
-          loadOp: 'clear',
-          storeOp: 'store',
-          clearValue: { r: 0, g: 0, b: 0, a: 1 },
-        },
+    const root = this.acquireTarget();
+    this.clearTarget(encoder, root, {
+      r: this.background.r * this.background.a,
+      g: this.background.g * this.background.a,
+      b: this.background.b * this.background.a,
+      a: this.background.a,
+    });
+    const stack: StackEntry[] = [{ tex: root, opacity: 1, mode: 0 }];
+
+    let solidCursor = 0;
+    let imageCursor = 0;
+    let blendSlot = 0;
+
+    for (const cmd of this.commands) {
+      const top = stack[stack.length - 1];
+
+      if (cmd.op === 'push-group') {
+        const target = this.acquireTarget();
+        this.clearTarget(encoder, target, { r: 0, g: 0, b: 0, a: 0 });
+        stack.push({ tex: target, opacity: cmd.opacity, mode: blendModeIndex(cmd.blend) });
+        continue;
+      }
+      if (cmd.op === 'pop-group') {
+        const group = stack.pop();
+        const parent = stack[stack.length - 1];
+        if (!group || !parent) {
+          continue;
+        }
+        const dest = this.acquireTarget();
+        this.blendPass(encoder, dest, parent.tex, group.tex, group.mode, group.opacity, blendSlot++);
+        this.releaseTarget(parent.tex);
+        this.releaseTarget(group.tex);
+        stack[stack.length - 1] = { ...parent, tex: dest };
+        continue;
+      }
+
+      // A leaf draw (solid or image).
+      const index = cmd.op === 'draw-solid' ? solidCursor : imageCursor;
+      if (cmd.blend === 'normal') {
+        this.drawLeaf(encoder, cmd, top.tex, index, 'load');
+      } else {
+        const source = this.acquireTarget();
+        this.clearTarget(encoder, source, { r: 0, g: 0, b: 0, a: 0 });
+        this.drawLeaf(encoder, cmd, source, index, 'load');
+        const dest = this.acquireTarget();
+        // Opacity is already baked into the source, so blend at opacity 1.
+        this.blendPass(encoder, dest, top.tex, source, blendModeIndex(cmd.blend), 1, blendSlot++);
+        this.releaseTarget(top.tex);
+        this.releaseTarget(source);
+        stack[stack.length - 1] = { ...top, tex: dest };
+      }
+      if (cmd.op === 'draw-solid') {
+        solidCursor++;
+      } else {
+        imageCursor++;
+      }
+    }
+
+    return stack[0].tex;
+  }
+
+  /** Draw one leaf (solid or image) into `target` with fixed-function `over`. */
+  private drawLeaf(
+    encoder: GPUCommandEncoder,
+    cmd: RenderCommand,
+    target: GPUTexture,
+    index: number,
+    loadOp: GPULoadOp
+  ): void {
+    if (cmd.op === 'draw-image') {
+      const cached = this.imageCache.get(cmd.assetId);
+      if (!cached || !this.imageBuffer) {
+        return; // asset not registered yet
+      }
+      const pass = encoder.beginRenderPass({
+        colorAttachments: [{ view: target.createView(), loadOp, storeOp: 'store', clearValue: { r: 0, g: 0, b: 0, a: 0 } }],
+      });
+      pass.setPipeline(this.image.pipeline);
+      pass.setBindGroup(0, this.quadBindGroup);
+      pass.setBindGroup(1, cached.bindGroup);
+      pass.setVertexBuffer(0, this.unitQuadBuffer);
+      pass.setVertexBuffer(1, this.imageBuffer);
+      pass.draw(4, 1, 0, index);
+      pass.end();
+      return;
+    }
+    if (!this.solidBuffer) {
+      return;
+    }
+    const pass = encoder.beginRenderPass({
+      colorAttachments: [{ view: target.createView(), loadOp, storeOp: 'store', clearValue: { r: 0, g: 0, b: 0, a: 0 } }],
+    });
+    pass.setPipeline(this.quadPipeline);
+    pass.setBindGroup(0, this.quadBindGroup);
+    pass.setVertexBuffer(0, this.unitQuadBuffer);
+    pass.setVertexBuffer(1, this.solidBuffer);
+    pass.draw(4, 1, 0, index);
+    pass.end();
+  }
+
+  /** Composite `source` over `backdrop` into `dest` via the blend shader. */
+  private blendPass(
+    encoder: GPUCommandEncoder,
+    dest: GPUTexture,
+    backdrop: GPUTexture,
+    source: GPUTexture,
+    mode: number,
+    opacity: number,
+    slot: number
+  ): void {
+    const offset = slot * 256;
+    this.device.queue.writeBuffer(
+      this.blendParamsBuffer,
+      offset,
+      new Float32Array([mode, opacity, 0, 0])
+    );
+    const bindGroup = this.device.createBindGroup({
+      layout: this.compositor.layout,
+      entries: [
+        { binding: 0, resource: backdrop.createView() },
+        { binding: 1, resource: source.createView() },
+        { binding: 2, resource: { buffer: this.blendParamsBuffer, offset, size: 16 } },
       ],
     });
-    present.setPipeline(this.presentPipeline);
-    present.setBindGroup(0, this.presentBindGroup);
-    present.draw(3);
-    present.end();
+    const pass = encoder.beginRenderPass({
+      colorAttachments: [{ view: dest.createView(), loadOp: 'clear', storeOp: 'store', clearValue: { r: 0, g: 0, b: 0, a: 0 } }],
+    });
+    pass.setPipeline(this.compositor.pipeline);
+    pass.setBindGroup(0, bindGroup);
+    pass.draw(3);
+    pass.end();
+  }
+
+  /** Present pass: box-downsample the supersampled composite to the display. */
+  private presentPass(encoder: GPUCommandEncoder, composite: GPUTexture, targetView: GPUTextureView): void {
+    const bindGroup = this.device.createBindGroup({
+      layout: this.presentLayout,
+      entries: [
+        { binding: 0, resource: composite.createView() },
+        { binding: 1, resource: { buffer: this.paramsBuffer } },
+        { binding: 2, resource: this.noiseTexture.createView() },
+      ],
+    });
+    const pass = encoder.beginRenderPass({
+      colorAttachments: [{ view: targetView, loadOp: 'clear', storeOp: 'store', clearValue: { r: 0, g: 0, b: 0, a: 1 } }],
+    });
+    pass.setPipeline(this.presentPipeline);
+    pass.setBindGroup(0, bindGroup);
+    pass.draw(3);
+    pass.end();
+  }
+
+  private clearTarget(encoder: GPUCommandEncoder, target: GPUTexture, color: RendererColor): void {
+    encoder
+      .beginRenderPass({
+        colorAttachments: [{ view: target.createView(), loadOp: 'clear', storeOp: 'store', clearValue: color }],
+      })
+      .end();
+  }
+
+  /** Take a free layer target from the pool, or grow the pool. */
+  private acquireTarget(): GPUTexture {
+    const free = this.targetFree.pop();
+    if (free) {
+      return free;
+    }
+    const target = this.device.createTexture({
+      size: [this.width * this.sampleScale, this.height * this.sampleScale],
+      format: SCENE_FORMAT,
+      usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING,
+    });
+    this.targetPool.push(target);
+    return target;
+  }
+
+  private releaseTarget(target: GPUTexture): void {
+    this.targetFree.push(target);
+  }
+
+  private destroyTargetPool(): void {
+    for (const target of this.targetPool) {
+      target.destroy();
+    }
+    this.targetPool.length = 0;
+    this.targetFree = [];
   }
 
   private updateViewport(): void {
@@ -783,25 +1060,5 @@ export class WebGpuRenderer {
       scale -= 1;
     }
     return scale;
-  }
-
-  private createSceneTarget(): GPUTexture {
-    this.sampleScale = this.computeScale();
-    return this.device.createTexture({
-      size: [this.width * this.sampleScale, this.height * this.sampleScale],
-      format: SCENE_FORMAT,
-      usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING,
-    });
-  }
-
-  private createPresentBindGroup(): GPUBindGroup {
-    return this.device.createBindGroup({
-      layout: this.presentLayout,
-      entries: [
-        { binding: 0, resource: this.sceneTarget.createView() },
-        { binding: 1, resource: { buffer: this.paramsBuffer } },
-        { binding: 2, resource: this.noiseTexture.createView() },
-      ],
-    });
   }
 }

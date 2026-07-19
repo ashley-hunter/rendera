@@ -9,7 +9,7 @@ import {
   type ImageNode,
   type LayerNode,
 } from '@rendera/core';
-import { encode8, linearToSrgb } from './color';
+import { encode8, linearToSrgb, srgbToLinear } from './color';
 import { WebGpuRenderer, type ReadbackResult } from './renderer';
 
 /** A solid-colour image bitmap of the given size (sRGB 8-bit values). */
@@ -95,7 +95,7 @@ describe('WebGpuRenderer colour pipeline', () => {
     });
     const items = buildRenderList(doc, createCamera());
     const item = items.find((i) => i.nodeId === layer.id);
-    if (!item || item.kind !== 'solid') {
+    if (!item || item.op !== 'draw-solid') {
       throw new Error('no solid quad for layer');
     }
 
@@ -179,8 +179,8 @@ describe('WebGpuRenderer colour pipeline', () => {
     });
     const items = buildRenderList(doc, createCamera());
     const item = items.find((i) => i.nodeId === layer.id);
-    if (!item) {
-      throw new Error('no quad for layer');
+    if (!item || item.op !== 'draw-solid') {
+      throw new Error('no solid quad for layer');
     }
     const quadMax = encode8(
       linearToSrgb(Math.max(item.color.r, item.color.g, item.color.b))
@@ -237,7 +237,7 @@ describe('WebGpuRenderer colour pipeline', () => {
       transform: createTransform({ translation: vec2(16, 16) }),
     });
     const items = buildRenderList(doc, createCamera());
-    expect(items.some((i) => i.kind === 'image' && i.nodeId === image.id)).toBe(true);
+    expect(items.some((i) => i.op === 'draw-image' && i.nodeId === image.id)).toBe(true);
 
     const renderer = await WebGpuRenderer.create(makeCanvas(64), {
       colorSpace: 'srgb',
@@ -357,6 +357,85 @@ describe('WebGpuRenderer colour pipeline', () => {
     expect(colored).toBeGreaterThan(0);
 
     renderer.destroy();
+  });
+
+  // --- compositing: blend modes + group opacity (linear light) ---
+
+  type LinRgba = { r: number; g: number; b: number; a: number };
+
+  const solidLayer = (
+    doc: SceneDocument,
+    color: LinRgba,
+    blend?: import('@rendera/core').BlendMode,
+    parentId?: string
+  ): void => {
+    doc.insert<LayerNode>(
+      {
+        type: 'layer',
+        name: 'l',
+        size: vec2(48, 48),
+        transform: createTransform({ translation: vec2(8, 8) }),
+        fill: { type: 'solid', color },
+        blendMode: blend,
+      },
+      parentId ? { parentId } : undefined
+    );
+  };
+
+  const compositeCenter = async (build: (doc: SceneDocument) => void): Promise<LinRgba> => {
+    const doc = SceneDocument.create({ idFactory: createSequentialIdFactory('n') });
+    build(doc);
+    const renderer = await WebGpuRenderer.create(makeCanvas(64), { colorSpace: 'srgb', dither: false });
+    renderer.setClearColor({ r: 0, g: 0, b: 0, a: 1 });
+    renderer.setRenderList(buildRenderList(doc, createCamera()));
+    const rb = await renderer.readback();
+    const c = pixel(rb, 32, 32);
+    renderer.destroy();
+    return c;
+  };
+
+  it('composites Multiply in linear light (0.6 x 0.5 = 0.3)', async () => {
+    const c = await compositeCenter((doc) => {
+      solidLayer(doc, { r: 0.6, g: 0.6, b: 0.6, a: 1 });
+      solidLayer(doc, { r: 0.5, g: 0.5, b: 0.5, a: 1 }, 'multiply');
+    });
+    const expected = encode8(linearToSrgb(0.3));
+    expect(near(c.r, expected)).toBe(true);
+    expect(near(c.g, expected)).toBe(true);
+    expect(near(c.b, expected)).toBe(true);
+  });
+
+  it('composites Screen in linear light (0.6 + 0.5 - 0.3 = 0.8)', async () => {
+    const c = await compositeCenter((doc) => {
+      solidLayer(doc, { r: 0.6, g: 0.6, b: 0.6, a: 1 });
+      solidLayer(doc, { r: 0.5, g: 0.5, b: 0.5, a: 1 }, 'screen');
+    });
+    const expected = encode8(linearToSrgb(0.8));
+    expect(near(c.r, expected)).toBe(true);
+  });
+
+  it('applies group opacity to the composited group (white group @ 0.5 over black = 0.5)', async () => {
+    const c = await compositeCenter((doc) => {
+      const g = doc.insert<GroupNode>({ type: 'group', name: 'g', opacity: 0.5 });
+      solidLayer(doc, { r: 1, g: 1, b: 1, a: 1 }, undefined, g.id);
+    });
+    const expected = encode8(linearToSrgb(0.5));
+    expect(near(c.r, expected)).toBe(true);
+    expect(near(c.g, expected)).toBe(true);
+    expect(near(c.b, expected)).toBe(true);
+  });
+
+  it('composites Luminosity: backdrop chroma, source luminance', async () => {
+    // Red backdrop, grey (lum 0.5) source in Luminosity -> red-ish hue whose
+    // linear luminance tracks the source (0.5).
+    const c = await compositeCenter((doc) => {
+      solidLayer(doc, { r: 1, g: 0, b: 0, a: 1 });
+      solidLayer(doc, { r: 0.5, g: 0.5, b: 0.5, a: 1 }, 'luminosity');
+    });
+    const lin = (v: number): number => srgbToLinear(v / 255);
+    const luminance = 0.3 * lin(c.r) + 0.59 * lin(c.g) + 0.11 * lin(c.b);
+    expect(Math.abs(luminance - 0.5)).toBeLessThan(0.04);
+    expect(c.r).toBeGreaterThan(c.g); // hue stayed red
   });
 
   // NOTE: the on-screen canvas *swapchain* present cannot be verified here —

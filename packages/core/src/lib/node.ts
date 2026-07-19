@@ -12,9 +12,11 @@
  * store when omitted from an insert (see the node utils' `createDefaults`).
  */
 
+import type { BlendMode } from './blend';
 import type { Transform } from './transform';
 import type { OrderKey } from './ordering';
 import type { NodeId } from './id';
+import type { LinearRgba } from './render-list';
 import type { Vec2 } from './vec2';
 
 /** The common shape of every node record. */
@@ -28,10 +30,25 @@ export interface SceneNode {
   index: OrderKey;
 }
 
-/** A node that participates in the transform hierarchy. */
+/** How a layer's rectangle is painted. A tagged value so gradients/patterns
+ * can slot in behind the same field later without a migration. */
+export type Fill = { readonly type: 'solid'; readonly color: LinearRgba };
+
+/**
+ * A node that participates in the transform hierarchy. Also carries the
+ * universal compositing properties — every spatial node can be faded
+ * (`opacity`), blended (`blendMode`), or hidden (`visible`); all default when
+ * omitted (opacity 1, blend `'normal'`, visible `true`).
+ */
 export interface SpatialNode extends SceneNode {
   /** Decomposed local transform relative to the parent (ADR 0006). */
   transform: Transform;
+  /** Layer opacity in [0, 1] (default 1). */
+  opacity?: number;
+  /** Compositing blend mode (default `'normal'`). */
+  blendMode?: BlendMode;
+  /** Whether the node (and its subtree) is drawn (default `true`). */
+  visible?: boolean;
 }
 
 /** The single, non-spatial root of a document (the coordinate origin). */
@@ -45,15 +62,19 @@ export interface DocumentNode extends SceneNode {
 export interface GroupNode extends SpatialNode {
   readonly type: 'group';
   name: string;
+  /** Force isolated compositing even at opacity 1 / Normal (default false —
+   * a plain group is pass-through: its children composite onto the backdrop). */
+  isolate?: boolean;
 }
 
-/** A leaf content node. Its local geometry is a `size`-sized rectangle until
- * a real raster/vector geometry replaces it in a later phase. */
+/** A leaf content node: a `size`-sized rectangle painted by `fill`. */
 export interface LayerNode extends SpatialNode {
   readonly type: 'layer';
   name: string;
   /** Local rectangular extent (top-left at the local origin). */
   size: Vec2;
+  /** How the rectangle is painted (default: an opaque mid-grey solid). */
+  fill?: Fill;
 }
 
 /**
@@ -69,8 +90,6 @@ export interface ImageNode extends SpatialNode {
   size: Vec2;
   /** Opaque handle to the pixel asset, resolved by the renderer. */
   assetId: string;
-  /** Layer opacity in [0, 1] (defaults to 1). */
-  opacity?: number;
 }
 
 /** The built-in node types known to the default registry. */

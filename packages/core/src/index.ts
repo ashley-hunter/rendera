@@ -11,6 +11,7 @@ export * from './lib/registry';
 export * from './lib/changes';
 export * from './lib/document';
 export * from './lib/history';
+export * from './lib/blend';
 export * from './lib/render-list';
 
 // Transform math. `matrix` also defines `approxEquals`; it is re-exported here
