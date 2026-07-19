@@ -6,5 +6,7 @@
   "type": "module",
   "main": "./index.js",
   "types": "./index.d.ts",
-  "dependencies": {}
+  "dependencies": {
+    "@rendera/core": "0.0.1"
+  }
 }

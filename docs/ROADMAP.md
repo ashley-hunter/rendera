@@ -74,8 +74,11 @@ so backend tests do **pixel readback** to assert colour correctness.
   subgroups; sRGB-canvas fallback path; wide-gamut primary matrices for coloured
   content.
 - ⬜ **Blue-noise dither** (currently a hash-based placeholder).
-- ⬜ **Scene quads through the camera** → then a **tiled compositor**
-  (`rgba16float` premultiplied tiles; opacity; Porter–Duff `over`; dirty tiles).
+- 🔨 **Scene quads through the camera:** a pure `buildRenderList(doc, camera)` in
+  `@rendera/core` flattens drawable nodes into screen-space quads (debug colours);
+  the renderer draws them instanced (premultiplied `over`) into the linear scene
+  target. Readback-tested (a quad lands at the right pixels/colour). *(Next: a
+  **tiled compositor** — tiles, opacity, dirty-tile invalidation.)*
 - ⬜ **Raster image layer** (tiled) + **pan/zoom/rotate viewport**: bicubic on
   magnify, trilinear-mip + anisotropic on minify.
 - ⬜ **Showcase:** a crisp image on a pannable/zoomable/rotatable canvas.

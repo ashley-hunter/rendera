@@ -1,12 +1,16 @@
 /**
- * Minimal WebGPU renderer — the first slice of the backend (ADR 0002/0003).
+ * Minimal WebGPU renderer — device + colour-correct present, now drawing a
+ * render list of quads (ADR 0002/0003).
  *
- * It proves the load-bearing colour pipeline: a linear-light `rgba16float`
- * scene target is cleared to a linear colour, then a present pass encodes it to
- * the display (sRGB transfer function, shared by Display-P3) with optional
- * blue-noise-style dither, writing to a Display-P3 (or sRGB) canvas. Geometry,
- * a real compositor, tiling, and blend modes come in later slices.
+ * The scene is composited in a linear-light `rgba16float` target: the target is
+ * cleared to a background colour, the render list's quads are drawn instanced
+ * (premultiplied `over`), and a present pass encodes the target to the display
+ * (sRGB transfer, shared by Display-P3) with optional dither. Geometry comes
+ * from `@rendera/core`'s pure render list; this backend just uploads and draws
+ * it. Tiling, real fills, and blend modes are later slices.
  */
+
+import type { QuadDrawItem } from '@rendera/core';
 
 export interface RendererColor {
   r: number;
@@ -16,9 +20,7 @@ export interface RendererColor {
 }
 
 export interface WebGpuRendererOptions {
-  /** Output colour space; falls back is the caller's concern. */
   colorSpace?: PredefinedColorSpace;
-  /** Whether to apply output dither (default true; disable for exact tests). */
   dither?: boolean;
 }
 
@@ -29,6 +31,32 @@ export interface ReadbackResult {
   format: GPUTextureFormat;
   bytesPerRow: number;
 }
+
+const QUAD_SHADER = /* wgsl */ `
+struct Viewport { size : vec2f, _pad : vec2f };
+@group(0) @binding(0) var<uniform> vp : Viewport;
+
+struct VOut { @builtin(position) pos : vec4f, @location(0) color : vec4f };
+
+@vertex fn vs(
+  @location(0) corner : vec2f,
+  @location(1) m0 : vec2f,
+  @location(2) m1 : vec2f,
+  @location(3) m2 : vec2f,
+  @location(4) color : vec4f
+) -> VOut {
+  let screen = m0 * corner.x + m1 * corner.y + m2;
+  let clip = vec2f(screen.x / vp.size.x * 2.0 - 1.0, 1.0 - screen.y / vp.size.y * 2.0);
+  var out : VOut;
+  out.pos = vec4f(clip, 0.0, 1.0);
+  out.color = color;
+  return out;
+}
+
+@fragment fn fs(@location(0) color : vec4f) -> @location(0) vec4f {
+  return vec4f(color.rgb * color.a, color.a); // premultiplied linear
+}
+`;
 
 const PRESENT_SHADER = /* wgsl */ `
 @group(0) @binding(0) var sceneTex : texture_2d<f32>;
@@ -60,31 +88,41 @@ fn hash(p : vec2f) -> f32 {
 }
 `;
 
+const SCENE_FORMAT: GPUTextureFormat = 'rgba16float';
+
 export class WebGpuRenderer {
-  private clearColor: RendererColor = { r: 0, g: 0, b: 0, a: 1 };
+  private background: RendererColor = { r: 0, g: 0, b: 0, a: 1 };
   private width: number;
   private height: number;
   private sceneTarget: GPUTexture;
-  private bindGroup: GPUBindGroup;
+  private presentBindGroup: GPUBindGroup;
+
+  private instanceBuffer: GPUBuffer | null = null;
+  private instanceCapacity = 0;
+  private instanceCount = 0;
 
   private constructor(
     private readonly device: GPUDevice,
     private readonly context: GPUCanvasContext | null,
     readonly format: GPUTextureFormat,
     readonly colorSpace: PredefinedColorSpace,
-    private readonly pipeline: GPURenderPipeline,
-    private readonly bindGroupLayout: GPUBindGroupLayout,
+    private readonly presentPipeline: GPURenderPipeline,
+    private readonly presentLayout: GPUBindGroupLayout,
     private readonly paramsBuffer: GPUBuffer,
+    private readonly quadPipeline: GPURenderPipeline,
+    private readonly quadBindGroup: GPUBindGroup,
+    private readonly viewportBuffer: GPUBuffer,
+    private readonly unitQuadBuffer: GPUBuffer,
     width: number,
     height: number
   ) {
     this.width = width;
     this.height = height;
     this.sceneTarget = this.createSceneTarget();
-    this.bindGroup = this.createBindGroup();
+    this.presentBindGroup = this.createPresentBindGroup();
+    this.updateViewport();
   }
 
-  /** Acquire a device and build the renderer for a canvas (or offscreen). */
   static async create(
     canvas: HTMLCanvasElement | OffscreenCanvas,
     options: WebGpuRendererOptions = {}
@@ -111,24 +149,79 @@ export class WebGpuRenderer {
       });
     }
 
-    const module = device.createShaderModule({ code: PRESENT_SHADER });
-    const bindGroupLayout = device.createBindGroupLayout({
+    // --- present pipeline (scene -> display) ---
+    const presentModule = device.createShaderModule({ code: PRESENT_SHADER });
+    const presentLayout = device.createBindGroupLayout({
       entries: [
         { binding: 0, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'float' } },
         { binding: 1, visibility: GPUShaderStage.FRAGMENT, buffer: { type: 'uniform' } },
       ],
     });
-    const pipeline = device.createRenderPipeline({
-      layout: device.createPipelineLayout({ bindGroupLayouts: [bindGroupLayout] }),
-      vertex: { module, entryPoint: 'vs' },
-      fragment: { module, entryPoint: 'fs', targets: [{ format }] },
+    const presentPipeline = device.createRenderPipeline({
+      layout: device.createPipelineLayout({ bindGroupLayouts: [presentLayout] }),
+      vertex: { module: presentModule, entryPoint: 'vs' },
+      fragment: { module: presentModule, entryPoint: 'fs', targets: [{ format }] },
       primitive: { topology: 'triangle-list' },
     });
-
     const paramsBuffer = device.createBuffer({
       size: 16,
       usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
     });
+
+    // --- quad pipeline (render list -> linear scene target) ---
+    const quadModule = device.createShaderModule({ code: QUAD_SHADER });
+    const quadLayout = device.createBindGroupLayout({
+      entries: [{ binding: 0, visibility: GPUShaderStage.VERTEX, buffer: { type: 'uniform' } }],
+    });
+    const quadPipeline = device.createRenderPipeline({
+      layout: device.createPipelineLayout({ bindGroupLayouts: [quadLayout] }),
+      vertex: {
+        module: quadModule,
+        entryPoint: 'vs',
+        buffers: [
+          { arrayStride: 8, stepMode: 'vertex', attributes: [{ shaderLocation: 0, offset: 0, format: 'float32x2' }] },
+          {
+            arrayStride: 40,
+            stepMode: 'instance',
+            attributes: [
+              { shaderLocation: 1, offset: 0, format: 'float32x2' },
+              { shaderLocation: 2, offset: 8, format: 'float32x2' },
+              { shaderLocation: 3, offset: 16, format: 'float32x2' },
+              { shaderLocation: 4, offset: 24, format: 'float32x4' },
+            ],
+          },
+        ],
+      },
+      fragment: {
+        module: quadModule,
+        entryPoint: 'fs',
+        targets: [
+          {
+            format: SCENE_FORMAT,
+            blend: {
+              color: { srcFactor: 'one', dstFactor: 'one-minus-src-alpha', operation: 'add' },
+              alpha: { srcFactor: 'one', dstFactor: 'one-minus-src-alpha', operation: 'add' },
+            },
+          },
+        ],
+      },
+      primitive: { topology: 'triangle-strip' },
+    });
+    const viewportBuffer = device.createBuffer({
+      size: 16,
+      usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+    });
+    const quadBindGroup = device.createBindGroup({
+      layout: quadLayout,
+      entries: [{ binding: 0, resource: { buffer: viewportBuffer } }],
+    });
+    // Unit square as a triangle-strip: (0,0),(1,0),(0,1),(1,1).
+    const unitQuadBuffer = device.createBuffer({
+      size: 32,
+      usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST,
+    });
+    device.queue.writeBuffer(unitQuadBuffer, 0, new Float32Array([0, 0, 1, 0, 0, 1, 1, 1]));
+
     const width = Math.max(1, canvas.width || 1);
     const height = Math.max(1, canvas.height || 1);
 
@@ -137,9 +230,13 @@ export class WebGpuRenderer {
       context,
       format,
       colorSpace,
-      pipeline,
-      bindGroupLayout,
+      presentPipeline,
+      presentLayout,
       paramsBuffer,
+      quadPipeline,
+      quadBindGroup,
+      viewportBuffer,
+      unitQuadBuffer,
       width,
       height
     );
@@ -147,12 +244,11 @@ export class WebGpuRenderer {
     return renderer;
   }
 
-  /** Set the linear-light clear colour of the scene target. */
+  /** Set the linear-light background colour of the scene. */
   setClearColor(color: RendererColor): void {
-    this.clearColor = color;
+    this.background = color;
   }
 
-  /** Enable/disable output dither. */
   setDither(enabled: boolean): void {
     this.device.queue.writeBuffer(
       this.paramsBuffer,
@@ -161,16 +257,47 @@ export class WebGpuRenderer {
     );
   }
 
-  /** Resize the scene target (device pixels). */
+  /** Upload the quads to draw (screen-space transform + linear colour each). */
+  setRenderList(items: readonly QuadDrawItem[]): void {
+    this.instanceCount = items.length;
+    if (items.length === 0) {
+      return;
+    }
+    const data = new Float32Array(items.length * 10);
+    items.forEach((item, i) => {
+      const o = i * 10;
+      const m = item.transform;
+      data[o] = m.a;
+      data[o + 1] = m.b;
+      data[o + 2] = m.c;
+      data[o + 3] = m.d;
+      data[o + 4] = m.e;
+      data[o + 5] = m.f;
+      data[o + 6] = item.color.r;
+      data[o + 7] = item.color.g;
+      data[o + 8] = item.color.b;
+      data[o + 9] = item.color.a;
+    });
+    if (!this.instanceBuffer || this.instanceCapacity < data.byteLength) {
+      this.instanceBuffer?.destroy();
+      this.instanceBuffer = this.device.createBuffer({
+        size: data.byteLength,
+        usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST,
+      });
+      this.instanceCapacity = data.byteLength;
+    }
+    this.device.queue.writeBuffer(this.instanceBuffer, 0, data);
+  }
+
   resize(width: number, height: number): void {
     this.width = Math.max(1, Math.floor(width));
     this.height = Math.max(1, Math.floor(height));
     this.sceneTarget.destroy();
     this.sceneTarget = this.createSceneTarget();
-    this.bindGroup = this.createBindGroup();
+    this.presentBindGroup = this.createPresentBindGroup();
+    this.updateViewport();
   }
 
-  /** Render to the configured canvas. */
   render(): void {
     if (!this.context) {
       throw new Error('renderer has no canvas context');
@@ -180,7 +307,6 @@ export class WebGpuRenderer {
     this.device.queue.submit([encoder.finish()]);
   }
 
-  /** Render to an offscreen texture and read the encoded pixels back (tests). */
   async readback(): Promise<ReadbackResult> {
     const bytesPerRow = Math.ceil((this.width * 4) / 256) * 256;
     const output = this.device.createTexture({
@@ -195,11 +321,7 @@ export class WebGpuRenderer {
 
     const encoder = this.device.createCommandEncoder();
     this.encode(encoder, output.createView());
-    encoder.copyTextureToBuffer(
-      { texture: output },
-      { buffer, bytesPerRow },
-      [this.width, this.height]
-    );
+    encoder.copyTextureToBuffer({ texture: output }, { buffer, bytesPerRow }, [this.width, this.height]);
     this.device.queue.submit([encoder.finish()]);
 
     await buffer.mapAsync(GPUMapMode.READ);
@@ -214,25 +336,34 @@ export class WebGpuRenderer {
   destroy(): void {
     this.sceneTarget.destroy();
     this.paramsBuffer.destroy();
+    this.viewportBuffer.destroy();
+    this.unitQuadBuffer.destroy();
+    this.instanceBuffer?.destroy();
   }
 
   private encode(encoder: GPUCommandEncoder, targetView: GPUTextureView): void {
-    // Clear the linear scene target.
-    encoder
-      .beginRenderPass({
-        colorAttachments: [
-          {
-            view: this.sceneTarget.createView(),
-            loadOp: 'clear',
-            storeOp: 'store',
-            clearValue: this.clearColor,
-          },
-        ],
-      })
-      .end();
+    // Scene pass: clear to background, draw the quads (premultiplied over).
+    const scenePass = encoder.beginRenderPass({
+      colorAttachments: [
+        {
+          view: this.sceneTarget.createView(),
+          loadOp: 'clear',
+          storeOp: 'store',
+          clearValue: this.background,
+        },
+      ],
+    });
+    if (this.instanceCount > 0 && this.instanceBuffer) {
+      scenePass.setPipeline(this.quadPipeline);
+      scenePass.setBindGroup(0, this.quadBindGroup);
+      scenePass.setVertexBuffer(0, this.unitQuadBuffer);
+      scenePass.setVertexBuffer(1, this.instanceBuffer);
+      scenePass.draw(4, this.instanceCount);
+    }
+    scenePass.end();
 
-    // Present: encode linear -> display into the target.
-    const pass = encoder.beginRenderPass({
+    // Present pass: encode linear scene -> display.
+    const present = encoder.beginRenderPass({
       colorAttachments: [
         {
           view: targetView,
@@ -242,23 +373,31 @@ export class WebGpuRenderer {
         },
       ],
     });
-    pass.setPipeline(this.pipeline);
-    pass.setBindGroup(0, this.bindGroup);
-    pass.draw(3);
-    pass.end();
+    present.setPipeline(this.presentPipeline);
+    present.setBindGroup(0, this.presentBindGroup);
+    present.draw(3);
+    present.end();
+  }
+
+  private updateViewport(): void {
+    this.device.queue.writeBuffer(
+      this.viewportBuffer,
+      0,
+      new Float32Array([this.width, this.height, 0, 0])
+    );
   }
 
   private createSceneTarget(): GPUTexture {
     return this.device.createTexture({
       size: [this.width, this.height],
-      format: 'rgba16float',
+      format: SCENE_FORMAT,
       usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING,
     });
   }
 
-  private createBindGroup(): GPUBindGroup {
+  private createPresentBindGroup(): GPUBindGroup {
     return this.device.createBindGroup({
-      layout: this.bindGroupLayout,
+      layout: this.presentLayout,
       entries: [
         { binding: 0, resource: this.sceneTarget.createView() },
         { binding: 1, resource: { buffer: this.paramsBuffer } },

@@ -388,6 +388,12 @@ export class SceneDocument {
     return multiply(world, this.getLocalMatrix(node));
   }
 
+  /** The node's own local-space geometry bounds, or `null` if it has none. */
+  getLocalBounds(id: NodeId): Bounds | null {
+    const node = this.require(id);
+    return this.registry.require(node.type).getLocalBounds(node);
+  }
+
   /**
    * The node's world-space axis-aligned bounds. Leaf geometry is transformed
    * into world space; a container's bounds are the union of its children's.
