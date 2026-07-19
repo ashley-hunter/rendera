@@ -1,7 +1,7 @@
 <div class="inspector">
   <div class="toolbar">
     <button type="button" (click)="addLayer()">+ Layer</button>
-    <button type="button" (click)="deleteSelected()" [disabled]="!selectedId()">
+    <button type="button" (click)="deleteSelected()" [disabled]="!hasSelection()">
       Delete
     </button>
     <button type="button" (click)="undo()" [disabled]="!canUndo()">Undo</button>
@@ -24,9 +24,9 @@
           <button
             type="button"
             class="row"
-            [class.selected]="row.id === selectedId()"
+            [class.selected]="isRowSelected(row.id)"
             [style.paddingLeft.px]="8 + row.depth * 14"
-            (click)="select(row.id)"
+            (click)="selectRow(row.id)"
           >
             <span class="type">{{ row.type }}</span>
             <span class="name">{{ row.name }}</span>

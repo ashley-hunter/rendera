@@ -11,11 +11,19 @@ import {
 import {
   createCamera,
   createTransform,
+  EMPTY_SELECTION,
   fitBounds,
   History,
+  isAdditive,
+  isSelected,
   panBy,
+  pointerToWorld,
+  pruneSelection,
+  resolveSelectionClick,
   SceneDocument,
-  screenToWorld,
+  selectionSize,
+  selectOnly,
+  subtract,
   vec2,
   zoomAround,
   type Camera,
@@ -23,8 +31,11 @@ import {
   type LayerNode,
   type NodeId,
   type SceneNode,
+  type Selection,
+  type Vec2,
 } from '@rendera/core';
 import { drawScene } from './draw-scene';
+import { toPointerInput } from './pointer-input';
 
 interface TreeRow {
   id: NodeId;
@@ -37,7 +48,6 @@ function nodeName(node: SceneNode): string {
   return (node as { name?: string }).name ?? node.type;
 }
 
-/** Seed a small sample scene (not recorded in history — created before it). */
 function createSampleDocument(): SceneDocument {
   const doc = SceneDocument.create({ name: 'Inspector' });
   const group = doc.insert<GroupNode>({
@@ -69,9 +79,9 @@ function createSampleDocument(): SceneDocument {
 
 /**
  * Debug/showcase view of a `SceneDocument`, driving the framework-agnostic
- * kernel end-to-end: a Canvas2D visualization plus pan/zoom, click-to-select
- * (via `hitTest`), mutations, and undo/redo. This is NOT the product renderer
- * (that is the WebGPU backend, Phase 2).
+ * kernel end-to-end: a Canvas2D visualization plus pan/zoom, click and
+ * shift-click selection (via `PointerInput` + `hitTest` + `Selection`),
+ * mutations, and undo/redo. Not the product renderer (WebGPU is Phase 2).
  */
 @Component({
   selector: 'rendera-scene-inspector',
@@ -88,15 +98,18 @@ export class SceneInspector {
   private readonly history = new History(this.document);
 
   protected readonly camera = signal<Camera>(createCamera());
-  protected readonly selectedId = signal<NodeId | null>(null);
-  /** Bumped on every document change to drive tree/redraw recomputation. */
+  protected readonly selection = signal<Selection>(EMPTY_SELECTION);
   private readonly revision = signal(0);
 
   private layerCounter = 0;
   private dragging = false;
   private moved = false;
-  private lastPointer: { x: number; y: number } | null = null;
+  private lastScreen: Vec2 | null = null;
   private resizeObserver?: ResizeObserver;
+
+  protected readonly hasSelection = computed(
+    () => selectionSize(this.selection()) > 0
+  );
 
   protected readonly tree = computed<TreeRow[]>(() => {
     this.revision();
@@ -128,7 +141,7 @@ export class SceneInspector {
     this.document.subscribe(() => this.revision.update((v) => v + 1));
     effect(() => {
       this.camera();
-      this.selectedId();
+      this.selection();
       this.revision();
       this.draw();
     });
@@ -142,6 +155,10 @@ export class SceneInspector {
     });
   }
 
+  protected isRowSelected(id: NodeId): boolean {
+    return isSelected(this.selection(), id);
+  }
+
   protected addLayer(): void {
     const n = ++this.layerCounter;
     const layer = this.document.insert<LayerNode>({
@@ -152,26 +169,34 @@ export class SceneInspector {
         translation: vec2((n * 40) % 320, (n * 30) % 220),
       }),
     });
-    this.selectedId.set(layer.id);
+    this.selection.set(selectOnly(this.selection(), layer.id));
   }
 
   protected deleteSelected(): void {
-    const id = this.selectedId();
-    if (!id || id === this.document.root.id) {
+    const ids = [...this.selection().ids].filter(
+      (id) => id !== this.document.root.id
+    );
+    if (ids.length === 0) {
       return;
     }
-    this.document.remove(id);
-    this.selectedId.set(null);
+    this.document.transaction(() => {
+      for (const id of ids) {
+        if (this.document.has(id)) {
+          this.document.remove(id);
+        }
+      }
+    });
+    this.selection.set(EMPTY_SELECTION);
   }
 
   protected undo(): void {
     this.history.undo();
-    this.pruneSelection();
+    this.selection.update((s) => pruneSelection(s, this.document));
   }
 
   protected redo(): void {
     this.history.redo();
-    this.pruneSelection();
+    this.selection.update((s) => pruneSelection(s, this.document));
   }
 
   protected fit(): void {
@@ -186,66 +211,67 @@ export class SceneInspector {
     );
   }
 
-  protected select(id: NodeId): void {
-    this.selectedId.set(id);
+  protected selectRow(id: NodeId): void {
+    this.selection.set(selectOnly(this.selection(), id));
   }
 
   protected onPointerDown(event: PointerEvent): void {
     const canvas = this.canvasRef()?.nativeElement;
-    canvas?.setPointerCapture?.(event.pointerId);
+    if (!canvas) {
+      return;
+    }
+    try {
+      canvas.setPointerCapture?.(event.pointerId);
+    } catch {
+      // Ignore: the pointer may not be active (e.g. a synthetic event in tests).
+    }
     this.dragging = true;
     this.moved = false;
-    this.lastPointer = this.toCanvas(event);
+    this.lastScreen = toPointerInput(event, canvas, 'down').screen;
   }
 
   protected onPointerMove(event: PointerEvent): void {
-    if (!this.dragging || !this.lastPointer) {
+    const canvas = this.canvasRef()?.nativeElement;
+    if (!this.dragging || !this.lastScreen || !canvas) {
       return;
     }
-    const p = this.toCanvas(event);
-    const dx = p.x - this.lastPointer.x;
-    const dy = p.y - this.lastPointer.y;
-    if (Math.abs(dx) + Math.abs(dy) > 2) {
+    const screen = toPointerInput(event, canvas, 'move').screen;
+    const delta = subtract(screen, this.lastScreen);
+    if (Math.abs(delta.x) + Math.abs(delta.y) > 2) {
       this.moved = true;
     }
-    this.camera.update((c) => panBy(c, vec2(dx, dy)));
-    this.lastPointer = p;
+    this.camera.update((c) => panBy(c, delta));
+    this.lastScreen = screen;
   }
 
   protected onPointerUp(event: PointerEvent): void {
+    const canvas = this.canvasRef()?.nativeElement;
     const wasDrag = this.moved;
     this.dragging = false;
-    this.lastPointer = null;
-    if (wasDrag) {
+    this.lastScreen = null;
+    if (wasDrag || !canvas) {
       return;
     }
-    const p = this.toCanvas(event);
-    const world = screenToWorld(this.camera(), vec2(p.x, p.y));
+    const input = toPointerInput(event, canvas, 'up');
+    const world = pointerToWorld(input, this.camera());
     const hit = this.document.hitTest(world);
-    this.selectedId.set(hit ? hit.id : null);
+    this.selection.update((s) =>
+      resolveSelectionClick(s, hit ? hit.id : null, {
+        additive: isAdditive(input.modifiers),
+      })
+    );
   }
 
   protected onWheel(event: WheelEvent): void {
     event.preventDefault();
-    const p = this.toCanvas(event);
-    const factor = event.deltaY < 0 ? 1.1 : 1 / 1.1;
-    this.camera.update((c) => zoomAround(c, vec2(p.x, p.y), factor));
-  }
-
-  private toCanvas(event: MouseEvent): { x: number; y: number } {
     const canvas = this.canvasRef()?.nativeElement;
     if (!canvas) {
-      return { x: 0, y: 0 };
+      return;
     }
     const rect = canvas.getBoundingClientRect();
-    return { x: event.clientX - rect.left, y: event.clientY - rect.top };
-  }
-
-  private pruneSelection(): void {
-    const id = this.selectedId();
-    if (id && !this.document.has(id)) {
-      this.selectedId.set(null);
-    }
+    const anchor = vec2(event.clientX - rect.left, event.clientY - rect.top);
+    const factor = event.deltaY < 0 ? 1.1 : 1 / 1.1;
+    this.camera.update((c) => zoomAround(c, anchor, factor));
   }
 
   private resize(): void {
@@ -273,7 +299,7 @@ export class SceneInspector {
       width: canvas.width,
       height: canvas.height,
       dpr: globalThis.devicePixelRatio ?? 1,
-      selectedId: this.selectedId(),
+      selectedIds: this.selection().ids,
     });
   }
 }

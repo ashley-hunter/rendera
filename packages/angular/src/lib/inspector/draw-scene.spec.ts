@@ -60,7 +60,7 @@ describe('drawScene', () => {
       width: 400,
       height: 300,
       dpr: 1,
-      selectedId: front.id,
+      selectedIds: new Set([front.id]),
     });
 
     const fills = ops.filter((o): o is FillOp => o.op === 'fill');

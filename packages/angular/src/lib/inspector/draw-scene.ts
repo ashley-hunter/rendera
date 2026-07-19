@@ -34,8 +34,8 @@ export interface DrawSceneOptions {
   height: number;
   /** Device pixel ratio (backing store is width x height device px). */
   dpr: number;
-  /** Currently selected node, highlighted if it is a drawable layer. */
-  selectedId?: NodeId | null;
+  /** Currently selected nodes, highlighted if they are drawable layers. */
+  selectedIds?: ReadonlySet<NodeId>;
   background?: string;
 }
 
@@ -46,7 +46,7 @@ export function drawScene(
   camera: Camera,
   options: DrawSceneOptions
 ): void {
-  const { width, height, dpr, selectedId } = options;
+  const { width, height, dpr, selectedIds } = options;
 
   ctx.setTransform(1, 0, 0, 1, 0, 0);
   ctx.fillStyle = options.background ?? INSPECTOR_COLORS.background;
@@ -69,7 +69,7 @@ export function drawScene(
         transformPoint(m, vec2(size.x, size.y)),
         transformPoint(m, vec2(0, size.y)),
       ];
-      const selected = selectedId === nodeId;
+      const selected = selectedIds?.has(nodeId) ?? false;
       ctx.beginPath();
       ctx.moveTo(corners[0].x, corners[0].y);
       ctx.lineTo(corners[1].x, corners[1].y);

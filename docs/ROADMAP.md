@@ -48,9 +48,14 @@ The authoritative model and all the math, fully unit-tested without a canvas.
   `@rendera/angular`) drawing the scene with a pure Canvas2D `drawScene`, plus
   drag-pan, wheel-zoom, click-to-select (`hitTest`), add/delete, and undo/redo —
   proving the model → view → input → history loop before any GPU work.
-- ⬜ **Selection model:** object selection (node ids) + a pixel-selection region type.
-- ⬜ **Input abstraction:** `PointerInput` (type, world/screen, pressure, tilt,
-  coalesced samples); tools as **state machines**; gesture recognizer.
+- ✅ **Selection model (object):** immutable `Selection` value (ids + primary) with
+  pure ops, click/shift-click resolution, and document pruning. *(Pixel selection
+  — marquee/lasso masks — and the `nodesInBounds` query are deferred to when a
+  selection tool or culling needs them.)*
+- ✅ **Input abstraction:** DOM-free `PointerInput` (phase, screen, buttons,
+  modifiers, pressure, tilt, coalesced) + a `toPointerInput` DOM adapter in
+  `@rendera/angular`. *(Tool state-machine framework deferred until multiple tools
+  motivate it.)*
 - ⬜ **Renderer interface (the seam):** deferred to Phase 2, designed against the
   WebGPU backend's real requirements rather than the inspector.
 
