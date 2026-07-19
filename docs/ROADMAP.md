@@ -112,14 +112,18 @@ so backend tests do **pixel readback** to assert colour correctness.
   to quadratics to sub-pixel tolerance, generic `path` node. A spike proved the
   Loop–Blinn implicit + derivative-coverage method on WebGPU: the AA rim scales
   with perimeter (~2×), not area (~4×) — a constant ~1px analytic edge.
-- ⬜ **Path/shape model** (`path` node + primitive helpers); **solid fills first**
-  (gradients interpolated in linear/OKLab, and strokes, are follow-ups); boolean ops.
-- ⬜ **Analytic fill rasterizer:** per-layer exact coverage from quadratic + line
-  segments (nonzero / even-odd), modulating a linear fill, composited through the
-  backdrop-read compositor. *(Straight-edge coverage is the remaining easy case;
-  the spike proved the curved case.)*
+- ✅ **Path/shape model:** generic `path` node (line/quadratic/cubic/close) with a
+  tagged fill + winding rule, primitive helpers (rect, ellipse, rounded-rect,
+  polygon), cubic→quadratic conversion, hit-testing. **Solid fills** ship now;
+  gradients (linear/OKLab), strokes, and boolean ops are follow-ups.
+- ✅ **Analytic fill rasterizer:** per-pixel winding (nonzero / even-odd) + exact
+  distance to line/quadratic edges for a resolution-independent ~1px AA rim,
+  modulating a linear fill, composited through the backdrop-read compositor (so
+  blend modes / opacity / groups apply). Readback-verified; `Vectors` story stays
+  razor-sharp under deep zoom.
+- ⬜ **Strokes:** variable width, joins, caps, dashes.
 - ⬜ **Text:** MSDF atlas for zoomable UI text + a high-quality path for large/display type.
-- ⬜ **Showcase:** resolution-independent vector drawing that stays crisp at any zoom.
+- ⬜ **Gradients & boolean ops.**
 
 ## Phase 6 — Effects & non-destructive stack  ⬜  → `@rendera/effects`
 
