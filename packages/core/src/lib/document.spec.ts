@@ -1,3 +1,4 @@
+import type { ChangeSet } from './changes';
 import {
   DOCUMENT_SCHEMA_VERSION,
   SceneDocument,
@@ -188,6 +189,16 @@ describe('serialization', () => {
     expect(() => SceneDocument.fromJSON(missingParent)).toThrow(/missing parent/);
   });
 
+  it('preserves the change snapshots for round-trip', () => {
+    const doc = newDoc();
+    const l = layer(doc, 'x');
+    doc.update(l.id, { name: 'y' });
+    const restored = SceneDocument.fromJSON(
+      JSON.parse(JSON.stringify(doc.toJSON())) as SerializedDocument
+    );
+    expect((restored.require(l.id) as LayerNode).name).toBe('y');
+  });
+
   it('detects parent cycles in serialized input', () => {
     const doc = newDoc();
     const a = doc.insert<GroupNode>({ type: 'group', name: 'a' });
@@ -200,5 +211,61 @@ describe('serialization', () => {
       ),
     };
     expect(() => SceneDocument.fromJSON(cyclic)).toThrow(/cycle/);
+  });
+});
+
+describe('change stream', () => {
+  it('emits one change-set per mutation and stops after unsubscribe', () => {
+    const doc = newDoc();
+    const sets: ChangeSet[] = [];
+    const off = doc.subscribe((cs) => sets.push(cs));
+
+    layer(doc, 'a');
+    expect(sets).toHaveLength(1);
+    expect(sets[0].changes).toHaveLength(1);
+    expect(sets[0].changes[0].op).toBe('add');
+
+    off();
+    layer(doc, 'b');
+    expect(sets).toHaveLength(1);
+  });
+
+  it('groups a transaction into a single change-set', () => {
+    const doc = newDoc();
+    const sets: ChangeSet[] = [];
+    doc.subscribe((cs) => sets.push(cs));
+
+    doc.transaction(() => {
+      layer(doc, 'a');
+      layer(doc, 'b');
+    });
+    expect(sets).toHaveLength(1);
+    expect(sets[0].changes).toHaveLength(2);
+  });
+
+  it('rolls back and emits nothing when a transaction throws', () => {
+    const doc = newDoc();
+    const sets: ChangeSet[] = [];
+    doc.subscribe((cs) => sets.push(cs));
+
+    expect(() =>
+      doc.transaction(() => {
+        layer(doc, 'a');
+        throw new Error('boom');
+      })
+    ).toThrow('boom');
+
+    expect(doc.size).toBe(1);
+    expect(sets).toHaveLength(0);
+  });
+});
+
+describe('node immutability', () => {
+  it('does not mutate previously returned node objects', () => {
+    const doc = newDoc();
+    const original = layer(doc, 'before');
+    doc.update(original.id, { name: 'after' });
+    expect(original.name).toBe('before');
+    expect((doc.require(original.id) as LayerNode).name).toBe('after');
   });
 });

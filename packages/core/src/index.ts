@@ -8,4 +8,6 @@ export * from './lib/id';
 export * from './lib/ordering';
 export * from './lib/node';
 export * from './lib/registry';
+export * from './lib/changes';
 export * from './lib/document';
+export * from './lib/history';

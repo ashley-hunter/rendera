@@ -5,8 +5,19 @@
  * node's `parentId` and fractional `index`, never from nested arrays. This is
  * the authoritative model; rendering, history, and selection are projections
  * of it. The store is deliberately DOM-free and unit-testable in isolation.
+ *
+ * Nodes are treated as **immutable values**: a mutation replaces a node with a
+ * new object rather than mutating in place. Every mutation is recorded as a
+ * `NodeChange` and emitted as a `ChangeSet` to subscribers (history, and later
+ * reactivity). Multiple mutations can be grouped atomically with
+ * `transaction()`.
  */
 
+import {
+  invertChange,
+  type ChangeSet,
+  type NodeChange,
+} from './changes';
 import { createIdFactory, type IdFactory, type NodeId } from './id';
 import type { DocumentNode, NodeInput, SceneNode } from './node';
 import {
@@ -29,6 +40,9 @@ export interface SerializedDocument {
   nodes: SceneNode[];
 }
 
+/** A subscriber to the document's change stream. */
+export type ChangeListener = (changeSet: ChangeSet) => void;
+
 /** Current on-disk schema version. Bump + migrate on breaking changes. */
 export const DOCUMENT_SCHEMA_VERSION = 1;
 
@@ -40,11 +54,21 @@ export interface SceneDocumentOptions {
   idFactory?: IdFactory;
 }
 
+export interface TransactionOptions {
+  /** Consecutive change-sets sharing this key merge into one undo entry. */
+  coalesceKey?: string;
+}
+
 export class SceneDocument {
   private readonly nodes = new Map<NodeId, SceneNode>();
   private readonly registry: NodeRegistry;
   private readonly newId: IdFactory;
+  private readonly listeners = new Set<ChangeListener>();
   private rootId!: NodeId;
+
+  // Transaction state.
+  private buffer: NodeChange[] = [];
+  private depth = 0;
 
   private constructor(registry: NodeRegistry, idFactory: IdFactory) {
     this.registry = registry;
@@ -125,12 +149,13 @@ export class SceneDocument {
     let current = this.getParent(id);
     while (current) {
       ancestors.push(current);
-      current = current.parentId === null ? undefined : this.getParent(current.id);
+      current =
+        current.parentId === null ? undefined : this.getParent(current.id);
     }
     return ancestors;
   }
 
-  /** Whether `maybeAncestorId` is an ancestor of `id`. */
+  /** Whether `maybeAncestorId` is an ancestor of `id` (assumes acyclic tree). */
   isAncestor(maybeAncestorId: NodeId, id: NodeId): boolean {
     let current = this.get(id)?.parentId ?? null;
     while (current !== null) {
@@ -147,6 +172,64 @@ export class SceneDocument {
     return this.nodes.values();
   }
 
+  // --- change stream -------------------------------------------------------
+
+  /** Subscribe to the change stream. Returns an unsubscribe function. */
+  subscribe(listener: ChangeListener): () => void {
+    this.listeners.add(listener);
+    return () => {
+      this.listeners.delete(listener);
+    };
+  }
+
+  /**
+   * Run `fn`, grouping every mutation it makes into a single atomic change-set.
+   * If `fn` throws, all changes it made are rolled back and nothing is emitted.
+   * Transactions nest; only the outermost one emits.
+   */
+  transaction<T>(fn: () => T, options: TransactionOptions = {}): T {
+    const outermost = this.depth === 0;
+    this.depth++;
+    let result: T;
+    try {
+      result = fn();
+    } catch (error) {
+      this.depth--;
+      if (outermost) {
+        for (let i = this.buffer.length - 1; i >= 0; i--) {
+          this.applyToMap(invertChange(this.buffer[i]));
+        }
+        this.buffer = [];
+      }
+      throw error;
+    }
+    this.depth--;
+    if (outermost && this.buffer.length > 0) {
+      const changes = this.buffer;
+      this.buffer = [];
+      this.emit({ changes, coalesceKey: options.coalesceKey });
+    }
+    return result;
+  }
+
+  /**
+   * Apply externally-produced changes directly (bypassing validation) and emit
+   * them as one change-set. Low-level: used by history undo/redo and future
+   * replay/multiplayer. Prefer the mutation methods for authoring.
+   */
+  applyChanges(
+    changes: readonly NodeChange[],
+    options: TransactionOptions = {}
+  ): void {
+    if (changes.length === 0) {
+      return;
+    }
+    for (const change of changes) {
+      this.applyToMap(change);
+    }
+    this.emit({ changes: [...changes], coalesceKey: options.coalesceKey });
+  }
+
   // --- mutations -----------------------------------------------------------
 
   /** Insert a new node under `parentId` at `position`. Returns the node. */
@@ -154,66 +237,80 @@ export class SceneDocument {
     input: NodeInput<N>,
     options: { parentId?: NodeId; position?: InsertPosition } = {}
   ): N {
-    const parentId = options.parentId ?? this.rootId;
-    this.assertCanParent(parentId);
-    const index = this.indexForPosition(parentId, options.position ?? DEFAULT_POSITION);
-    const node = { ...input, id: this.newId(), parentId, index } as N;
-    this.nodes.set(node.id, node);
-    return node;
+    return this.transaction(() => {
+      const parentId = options.parentId ?? this.rootId;
+      this.assertCanParent(parentId);
+      const index = this.indexForPosition(
+        parentId,
+        options.position ?? DEFAULT_POSITION
+      );
+      const node = { ...input, id: this.newId(), parentId, index } as N;
+      this.commit({ op: 'add', id: node.id, node });
+      return node;
+    });
   }
 
-  /** Move a node to a new parent and/or position. */
+  /** Move a node to a new parent and/or position. Returns the new node. */
   move(
     id: NodeId,
     options: { parentId?: NodeId; position?: InsertPosition } = {}
   ): SceneNode {
-    const node = this.require(id);
-    if (node.parentId === null) {
-      throw new Error('cannot move the document root');
-    }
-    const parentId = options.parentId ?? node.parentId;
-    this.assertCanParent(parentId);
-    if (parentId === id || this.isAncestor(id, parentId)) {
-      throw new Error('cannot move a node into itself or its own descendant');
-    }
-    node.parentId = parentId;
-    node.index = this.indexForPosition(
-      parentId,
-      options.position ?? DEFAULT_POSITION,
-      id
-    );
-    return node;
+    return this.transaction(() => {
+      const node = this.require(id);
+      if (node.parentId === null) {
+        throw new Error('cannot move the document root');
+      }
+      const parentId = options.parentId ?? node.parentId;
+      this.assertCanParent(parentId);
+      if (parentId === id || this.isAncestor(id, parentId)) {
+        throw new Error('cannot move a node into itself or its own descendant');
+      }
+      const index = this.indexForPosition(
+        parentId,
+        options.position ?? DEFAULT_POSITION,
+        id
+      );
+      const after: SceneNode = { ...node, parentId, index };
+      this.commit({ op: 'update', id, before: node, after });
+      return after;
+    });
   }
 
   /** Shallow-merge data fields into a node. Structural fields are ignored. */
   update(id: NodeId, patch: Record<string, unknown>): SceneNode {
-    const node = this.require(id);
-    const target = node as unknown as Record<string, unknown>;
-    for (const [key, value] of Object.entries(patch)) {
-      if (STRUCTURAL_KEYS.has(key)) {
-        continue;
+    return this.transaction(() => {
+      const before = this.require(id);
+      const after = { ...before } as unknown as Record<string, unknown>;
+      for (const [key, value] of Object.entries(patch)) {
+        if (STRUCTURAL_KEYS.has(key)) {
+          continue;
+        }
+        after[key] = value;
       }
-      target[key] = value;
-    }
-    return node;
+      const afterNode = after as unknown as SceneNode;
+      this.commit({ op: 'update', id, before, after: afterNode });
+      return afterNode;
+    });
   }
 
   /** Remove a node and its whole subtree. Returns the removed ids. */
   remove(id: NodeId): NodeId[] {
-    const node = this.require(id);
-    if (node.parentId === null) {
-      throw new Error('cannot remove the document root');
-    }
-    const removed: NodeId[] = [];
-    const visit = (nodeId: NodeId): void => {
-      for (const child of this.getChildren(nodeId)) {
-        visit(child.id);
+    return this.transaction(() => {
+      const node = this.require(id);
+      if (node.parentId === null) {
+        throw new Error('cannot remove the document root');
       }
-      this.nodes.delete(nodeId);
-      removed.push(nodeId);
-    };
-    visit(id);
-    return removed;
+      const removed: NodeId[] = [];
+      const visit = (nodeId: NodeId): void => {
+        for (const child of this.getChildren(nodeId)) {
+          visit(child.id);
+        }
+        this.commit({ op: 'remove', id: nodeId, node: this.require(nodeId) });
+        removed.push(nodeId);
+      };
+      visit(id);
+      return removed;
+    });
   }
 
   // --- serialization -------------------------------------------------------
@@ -263,6 +360,37 @@ export class SceneDocument {
 
   // --- internals -----------------------------------------------------------
 
+  /** Record a change into the active transaction and apply it to the map. */
+  private commit(change: NodeChange): void {
+    this.applyToMap(change);
+    this.buffer.push(change);
+  }
+
+  /** Apply a change to the node map only (no recording, no emit). */
+  private applyToMap(change: NodeChange): void {
+    switch (change.op) {
+      case 'add':
+        this.nodes.set(change.id, change.node);
+        return;
+      case 'remove':
+        this.nodes.delete(change.id);
+        return;
+      case 'update':
+        this.nodes.set(change.id, change.after);
+        return;
+      default: {
+        const exhaustive: never = change;
+        throw new Error(`unknown change op: ${JSON.stringify(exhaustive)}`);
+      }
+    }
+  }
+
+  private emit(changeSet: ChangeSet): void {
+    for (const listener of this.listeners) {
+      listener(changeSet);
+    }
+  }
+
   private assertCanParent(parentId: NodeId): void {
     const parent = this.require(parentId);
     if (!this.registry.require(parent.type).canHaveChildren()) {
@@ -288,18 +416,26 @@ export class SceneDocument {
         if (i === -1) {
           throw new Error(`reference node "${position.id}" is not a sibling`);
         }
-        return generateKeyBetween(siblings[i - 1]?.index ?? null, siblings[i].index);
+        return generateKeyBetween(
+          siblings[i - 1]?.index ?? null,
+          siblings[i].index
+        );
       }
       case 'after': {
         const i = siblings.findIndex((child) => child.id === position.id);
         if (i === -1) {
           throw new Error(`reference node "${position.id}" is not a sibling`);
         }
-        return generateKeyBetween(siblings[i].index, siblings[i + 1]?.index ?? null);
+        return generateKeyBetween(
+          siblings[i].index,
+          siblings[i + 1]?.index ?? null
+        );
       }
       default: {
         const exhaustive: never = position;
-        throw new Error(`unknown insert position: ${JSON.stringify(exhaustive)}`);
+        throw new Error(
+          `unknown insert position: ${JSON.stringify(exhaustive)}`
+        );
       }
     }
   }
