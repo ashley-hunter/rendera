@@ -110,6 +110,48 @@ describe('WebGpuRenderer colour pipeline', () => {
     renderer.destroy();
   });
 
+  it('blue-noise dither splits a between-levels grey across both levels, unbiased', async () => {
+    // Linear 0.5 encodes to ~187.53/255 — between two 8-bit levels. Undithered,
+    // every pixel rounds to one flat value; blue-noise dither spreads pixels
+    // across both adjacent levels so the spatial mean tracks the true value.
+    const channel0 = (rb: ReadbackResult): number[] => {
+      const v: number[] = [];
+      for (let i = 0; i < rb.data.length; i += 4) {
+        v.push(rb.data[i]);
+      }
+      return v;
+    };
+    const mean = (xs: number[]): number => xs.reduce((a, b) => a + b, 0) / xs.length;
+    const expected = 255 * linearToSrgb(0.5);
+
+    const flatR = await WebGpuRenderer.create(makeCanvas(64), {
+      colorSpace: 'srgb',
+      dither: false,
+    });
+    flatR.setClearColor({ r: 0.5, g: 0.5, b: 0.5, a: 1 });
+    const flat = channel0(await flatR.readback());
+    flatR.destroy();
+
+    const ditheredR = await WebGpuRenderer.create(makeCanvas(64), {
+      colorSpace: 'srgb',
+      dither: true,
+    });
+    ditheredR.setClearColor({ r: 0.5, g: 0.5, b: 0.5, a: 1 });
+    const dithered = channel0(await ditheredR.readback());
+    ditheredR.destroy();
+
+    // Undithered: one flat level everywhere.
+    expect(new Set(flat).size).toBe(1);
+
+    // Dithered: exactly the two adjacent levels, and unbiased about the truth.
+    const levels = [...new Set(dithered)].sort((a, b) => a - b);
+    expect(levels.length).toBe(2);
+    expect(levels[1] - levels[0]).toBe(1);
+    expect(Math.abs(mean(dithered) - expected)).toBeLessThan(0.5);
+    // The dithered mean is a better estimate of the true value than the flat one.
+    expect(Math.abs(mean(dithered) - expected)).toBeLessThan(Math.abs(flat[0] - expected));
+  });
+
   it('supersamples: a rotated edge gets partial-coverage pixels that 1x lacks', async () => {
     // A rotated quad on a black background. With no supersampling every pixel is
     // fully inside or outside the quad (binary edge). With 2x supersampling the

@@ -11,6 +11,7 @@
  */
 
 import type { QuadDrawItem } from '@rendera/core';
+import { blueNoiseTile, BLUE_NOISE_SIZE } from './blue-noise';
 
 export interface RendererColor {
   r: number;
@@ -69,6 +70,7 @@ const PRESENT_SHADER = /* wgsl */ `
 @group(0) @binding(0) var sceneTex : texture_2d<f32>;
 struct Params { dither : f32, scale : f32, _p1 : f32, _p2 : f32 };
 @group(0) @binding(1) var<uniform> params : Params;
+@group(0) @binding(2) var noiseTex : texture_2d<f32>; // 64x64 blue-noise tile
 
 @vertex fn vs(@builtin(vertex_index) i : u32) -> @builtin(position) vec4f {
   var pos = array<vec2f, 3>(vec2f(-1.0, -1.0), vec2f(3.0, -1.0), vec2f(-1.0, 3.0));
@@ -79,10 +81,6 @@ fn linear_to_srgb(c : f32) -> f32 {
   let lo = c * 12.92;
   let hi = 1.055 * pow(max(c, 0.0), 1.0 / 2.4) - 0.055;
   return select(hi, lo, c <= 0.0031308);
-}
-
-fn hash(p : vec2f) -> f32 {
-  return fract(sin(dot(p, vec2f(12.9898, 78.233))) * 43758.5453);
 }
 
 @fragment fn fs(@builtin(position) frag : vec4f) -> @location(0) vec4f {
@@ -99,8 +97,10 @@ fn hash(p : vec2f) -> f32 {
   }
   let lin = acc / f32(s * s);
   var rgb = vec3f(linear_to_srgb(lin.r), linear_to_srgb(lin.g), linear_to_srgb(lin.b));
-  let d = (hash(frag.xy) - 0.5) / 255.0 * params.dither;
-  rgb = rgb + vec3f(d);
+  // Blue-noise ordered dither (tile wraps every 64 display px), applied once in
+  // the display domain so 8-bit quantization does not band smooth gradients.
+  let noise = textureLoad(noiseTex, vec2i(frag.xy) % vec2i(64, 64), 0).r;
+  rgb = rgb + vec3f((noise - 0.5) / 255.0 * params.dither);
   return vec4f(rgb, lin.a);
 }
 `;
@@ -135,6 +135,7 @@ export class WebGpuRenderer {
     private readonly quadBindGroup: GPUBindGroup,
     private readonly viewportBuffer: GPUBuffer,
     private readonly unitQuadBuffer: GPUBuffer,
+    private readonly noiseTexture: GPUTexture,
     width: number,
     height: number,
     supersample: number
@@ -185,6 +186,7 @@ export class WebGpuRenderer {
       entries: [
         { binding: 0, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'float' } },
         { binding: 1, visibility: GPUShaderStage.FRAGMENT, buffer: { type: 'uniform' } },
+        { binding: 2, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'float' } },
       ],
     });
     const presentPipeline = device.createRenderPipeline({
@@ -252,6 +254,19 @@ export class WebGpuRenderer {
     });
     device.queue.writeBuffer(unitQuadBuffer, 0, new Float32Array([0, 0, 1, 0, 0, 1, 1, 1]));
 
+    // Blue-noise dither tile (uploaded once; wrapped in the shader).
+    const noiseTexture = device.createTexture({
+      size: [BLUE_NOISE_SIZE, BLUE_NOISE_SIZE],
+      format: 'r8unorm',
+      usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST,
+    });
+    device.queue.writeTexture(
+      { texture: noiseTexture },
+      blueNoiseTile(),
+      { bytesPerRow: BLUE_NOISE_SIZE, rowsPerImage: BLUE_NOISE_SIZE },
+      [BLUE_NOISE_SIZE, BLUE_NOISE_SIZE]
+    );
+
     const width = Math.max(1, canvas.width || 1);
     const height = Math.max(1, canvas.height || 1);
 
@@ -267,6 +282,7 @@ export class WebGpuRenderer {
       quadBindGroup,
       viewportBuffer,
       unitQuadBuffer,
+      noiseTexture,
       width,
       height,
       options.supersample ?? 2
@@ -367,6 +383,7 @@ export class WebGpuRenderer {
     this.paramsBuffer.destroy();
     this.viewportBuffer.destroy();
     this.unitQuadBuffer.destroy();
+    this.noiseTexture.destroy();
     this.instanceBuffer?.destroy();
   }
 
@@ -452,6 +469,7 @@ export class WebGpuRenderer {
       entries: [
         { binding: 0, resource: this.sceneTarget.createView() },
         { binding: 1, resource: { buffer: this.paramsBuffer } },
+        { binding: 2, resource: this.noiseTexture.createView() },
       ],
     });
   }
