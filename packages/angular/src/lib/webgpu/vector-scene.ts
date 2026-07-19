@@ -5,10 +5,24 @@ import {
   roundedRectPath,
   SceneDocument,
   vec2,
+  type Path,
   type PathNode,
   type Vec2,
 } from '@rendera/core';
 import type { SceneSource } from './webgpu-scene';
+
+/** An open polyline through `points` (for stroking; not closed/filled). */
+function openPolyline(points: Vec2[]): Path {
+  return {
+    subpaths: [
+      {
+        start: points[0],
+        closed: false,
+        segments: points.slice(1).map((to) => ({ type: 'line', to }) as const),
+      },
+    ],
+  };
+}
 
 /** An n-pointed star polygon centred at (cx,cy). */
 function starPoints(cx: number, cy: number, outer: number, inner: number, points: number): Vec2[] {
@@ -34,6 +48,7 @@ export function createVectorScene(): SceneSource {
     name: 'card',
     path: roundedRectPath(20, 20, 500, 340, 28),
     fill: { type: 'solid', color: { r: 0.13, g: 0.15, b: 0.19, a: 1 } },
+    stroke: { paint: { type: 'solid', color: { r: 0.3, g: 0.34, b: 0.42, a: 1 } }, width: 3 },
   });
 
   doc.insert<PathNode>({
@@ -51,11 +66,26 @@ export function createVectorScene(): SceneSource {
     fill: { type: 'solid', color: { r: 0.25, g: 0.55, b: 0.95, a: 1 } },
   });
 
+  // Filled star with a dark miter stroke — sharp points.
   doc.insert<PathNode>({
     type: 'path',
     name: 'star',
     path: polygonPath(starPoints(160, 270, 68, 28, 5)),
     fill: { type: 'solid', color: { r: 0.98, g: 0.78, b: 0.2, a: 1 } },
+    stroke: { paint: { type: 'solid', color: { r: 0.2, g: 0.14, b: 0.05, a: 1 } }, width: 5, join: 'miter' },
+  });
+
+  // A thick open zig-zag: round joins + round caps.
+  doc.insert<PathNode>({
+    type: 'path',
+    name: 'zigzag',
+    path: openPolyline([vec2(60, 40), vec2(120, 90), vec2(180, 40), vec2(240, 90), vec2(300, 40)]),
+    stroke: {
+      paint: { type: 'solid', color: { r: 0.3, g: 0.75, b: 0.95, a: 1 } },
+      width: 14,
+      cap: 'round',
+      join: 'round',
+    },
   });
 
   // Even-odd ring (outer ellipse with an inner ellipse hole).

@@ -121,7 +121,10 @@ so backend tests do **pixel readback** to assert colour correctness.
   modulating a linear fill, composited through the backdrop-read compositor (so
   blend modes / opacity / groups apply). Readback-verified; `Vectors` story stays
   razor-sharp under deep zoom.
-- ⬜ **Strokes:** variable width, joins, caps, dashes.
+- ✅ **Strokes:** outline conversion — segment quads + miter/round/bevel joins +
+  butt/round/square caps, unioned via nonzero and filled by the analytic
+  rasterizer (so strokes inherit resolution-independent AA). A path can carry a
+  fill and a stroke. *(Variable width and dashes are follow-ups.)*
 - ⬜ **Text:** MSDF atlas for zoomable UI text + a high-quality path for large/display type.
 - ⬜ **Gradients & boolean ops.**
 

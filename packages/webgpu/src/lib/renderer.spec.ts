@@ -492,6 +492,29 @@ describe('WebGpuRenderer colour pipeline', () => {
     // The rim is analytic even without supersampling (1x already smooth).
   });
 
+  it('strokes a path outline (frame drawn, interior empty)', async () => {
+    const doc = SceneDocument.create({ idFactory: createSequentialIdFactory('n') });
+    doc.insert<PathNode>({
+      type: 'path',
+      name: 'frame',
+      path: rectPath(16, 16, 32, 32),
+      // Stroke only, no fill.
+      stroke: { paint: { type: 'solid', color: { r: 0.2, g: 0.8, b: 0.9, a: 1 } }, width: 6 },
+    });
+    const renderer = await WebGpuRenderer.create(makeCanvas(64), { colorSpace: 'srgb', dither: false });
+    renderer.setClearColor({ r: 0, g: 0, b: 0, a: 1 });
+    renderer.setRenderList(buildRenderList(doc, createCamera()));
+    const rb = await renderer.readback();
+
+    // On the top edge (y=16): the stroke colour.
+    const onEdge = pixel(rb, 32, 16);
+    expect(near(onEdge.b, encode8(linearToSrgb(0.9)))).toBe(true);
+    // Interior centre: background (stroke-only, no fill).
+    expect(Math.max(pixel(rb, 32, 32).r, pixel(rb, 32, 32).g, pixel(rb, 32, 32).b)).toBeLessThan(20);
+    // Outside the frame: background.
+    expect(Math.max(pixel(rb, 4, 4).r, pixel(rb, 4, 4).g, pixel(rb, 4, 4).b)).toBe(0);
+  });
+
   it('honours the even-odd fill rule (a square with a hole)', async () => {
     const doc = SceneDocument.create({ idFactory: createSequentialIdFactory('n') });
     doc.insert<PathNode>({

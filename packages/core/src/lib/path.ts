@@ -280,27 +280,30 @@ export function pathBounds(path: Path): Bounds | null {
   return points.length > 0 ? boundsFromPoints(points) : null;
 }
 
-/** Flatten each subpath into a polyline (for hit-testing), tolerance in units. */
-export function flattenPath(path: Path, tol = 0.25): Vec2[][] {
+/** Flatten each subpath into a polyline with its closed flag (tolerance in units). */
+export function flattenSubpaths(path: Path, tol = 0.25): { points: Vec2[]; closed: boolean }[] {
   const quads = toQuadraticPath(path, tol);
-  const polys: Vec2[][] = [];
-  for (const sub of quads.subpaths) {
-    const poly: Vec2[] = [sub.start];
+  return quads.subpaths.map((sub) => {
+    const points: Vec2[] = [sub.start];
     let cursor = sub.start;
     for (const seg of sub.segments) {
       if (seg.type === 'line') {
-        poly.push(seg.to);
+        points.push(seg.to);
       } else if (seg.type === 'quad') {
         const steps = Math.max(2, Math.ceil(Math.hypot(seg.to.x - cursor.x, seg.to.y - cursor.y) / 3));
         for (let i = 1; i <= steps; i++) {
-          poly.push(quadPoint(cursor, seg.control, seg.to, i / steps));
+          points.push(quadPoint(cursor, seg.control, seg.to, i / steps));
         }
       }
       cursor = seg.to;
     }
-    polys.push(poly);
-  }
-  return polys;
+    return { points, closed: sub.closed };
+  });
+}
+
+/** Flatten each subpath into a polyline (for hit-testing), tolerance in units. */
+export function flattenPath(path: Path, tol = 0.25): Vec2[][] {
+  return flattenSubpaths(path, tol).map((s) => s.points);
 }
 
 /** Whether `point` is inside `path` under `rule` (flattened winding test). */

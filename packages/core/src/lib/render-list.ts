@@ -29,6 +29,7 @@ import {
   type FillRule,
   type PathEdge,
 } from './path';
+import { strokePath } from './stroke';
 import { vec2 } from './vec2';
 
 /** A linear-light RGBA colour, components in [0, 1]. */
@@ -144,20 +145,51 @@ export function buildRenderList(doc: SceneDocument, camera: Camera): RenderComma
       // quadratics at a sub-pixel *screen* tolerance so curves stay exact at zoom.
       const screenMat = compose(worldToScreen, doc.getWorldMatrix(id));
       const screenPath = toQuadraticPath(transformPath(path.path, screenMat), 0.1);
-      const bounds = pathBounds(screenPath);
-      const edges = pathEdges(screenPath);
-      if (bounds && edges.length > 0) {
-        const color = path.fill?.type === 'solid' ? path.fill.color : DEFAULT_FILL;
-        commands.push({
-          op: 'draw-path',
-          nodeId: id,
-          color,
-          fillRule: path.fillRule ?? 'nonzero',
-          opacity,
-          blend,
-          edges,
-          bounds,
+
+      // Fill (also the default when a path has neither fill nor stroke).
+      if (path.fill || !path.stroke) {
+        const bounds = pathBounds(screenPath);
+        const edges = pathEdges(screenPath);
+        if (bounds && edges.length > 0) {
+          const color = path.fill?.type === 'solid' ? path.fill.color : DEFAULT_FILL;
+          commands.push({
+            op: 'draw-path',
+            nodeId: id,
+            color,
+            fillRule: path.fillRule ?? 'nonzero',
+            opacity,
+            blend,
+            edges,
+            bounds,
+          });
+        }
+      }
+
+      // Stroke: convert the outline (screen-space width) and fill it nonzero.
+      if (path.stroke && path.stroke.paint.type === 'solid') {
+        const s = path.stroke;
+        const det = screenMat.a * screenMat.d - screenMat.b * screenMat.c;
+        const scaleFactor = Math.sqrt(Math.abs(det)) || 1;
+        const outline = strokePath(screenPath, {
+          width: s.width * scaleFactor,
+          cap: s.cap,
+          join: s.join,
+          miterLimit: s.miterLimit,
         });
+        const bounds = pathBounds(outline);
+        const edges = pathEdges(outline);
+        if (bounds && edges.length > 0) {
+          commands.push({
+            op: 'draw-path',
+            nodeId: id,
+            color: s.paint.color,
+            fillRule: 'nonzero',
+            opacity,
+            blend,
+            edges,
+            bounds,
+          });
+        }
       }
       return;
     }

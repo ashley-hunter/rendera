@@ -14,6 +14,7 @@
 
 import type { BlendMode } from './blend';
 import type { FillRule, Path } from './path';
+import type { StrokeCap, StrokeJoin } from './stroke';
 import type { Transform } from './transform';
 import type { OrderKey } from './ordering';
 import type { NodeId } from './id';
@@ -34,6 +35,16 @@ export interface SceneNode {
 /** How a layer's rectangle is painted. A tagged value so gradients/patterns
  * can slot in behind the same field later without a migration. */
 export type Fill = { readonly type: 'solid'; readonly color: LinearRgba };
+
+/** A path's outline stroke: paint plus width, cap, join, and miter limit. */
+export interface Stroke {
+  readonly paint: Fill;
+  /** Stroke width in the path's local space. */
+  readonly width: number;
+  readonly cap?: StrokeCap;
+  readonly join?: StrokeJoin;
+  readonly miterLimit?: number;
+}
 
 /**
  * A node that participates in the transform hierarchy. Also carries the
@@ -102,10 +113,12 @@ export interface PathNode extends SpatialNode {
   name: string;
   /** Local-space geometry. */
   path: Path;
-  /** How the path is painted (default: an opaque mid-grey solid). */
+  /** How the path's interior is painted. Omit for a stroke-only path. */
   fill?: Fill;
-  /** Winding rule (default `'nonzero'`). */
+  /** Winding rule for the fill (default `'nonzero'`). */
   fillRule?: FillRule;
+  /** An optional outline stroke, painted over the fill. */
+  stroke?: Stroke;
 }
 
 /** The built-in node types known to the default registry. */
