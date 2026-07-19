@@ -1,0 +1,11 @@
+{
+  "name": "@rendera/angular",
+  "version": "0.0.1",
+  "peerDependencies": {
+    "@angular/core": "^22.0.0"
+  },
+  "dependencies": {
+    "@rendera/core": "0.0.1"
+  },
+  "sideEffects": false
+}
