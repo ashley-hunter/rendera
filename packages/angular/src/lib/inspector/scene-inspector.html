@@ -1,0 +1,38 @@
+<div class="inspector">
+  <div class="toolbar">
+    <button type="button" (click)="addLayer()">+ Layer</button>
+    <button type="button" (click)="deleteSelected()" [disabled]="!selectedId()">
+      Delete
+    </button>
+    <button type="button" (click)="undo()" [disabled]="!canUndo()">Undo</button>
+    <button type="button" (click)="redo()" [disabled]="!canRedo()">Redo</button>
+    <button type="button" (click)="fit()">Fit</button>
+    <span class="hint">drag = pan · wheel = zoom · click = select</span>
+  </div>
+  <div class="body">
+    <canvas
+      #canvas
+      class="canvas"
+      (pointerdown)="onPointerDown($event)"
+      (pointermove)="onPointerMove($event)"
+      (pointerup)="onPointerUp($event)"
+      (wheel)="onWheel($event)"
+    ></canvas>
+    <ul class="tree">
+      @for (row of tree(); track row.id) {
+        <li>
+          <button
+            type="button"
+            class="row"
+            [class.selected]="row.id === selectedId()"
+            [style.paddingLeft.px]="8 + row.depth * 14"
+            (click)="select(row.id)"
+          >
+            <span class="type">{{ row.type }}</span>
+            <span class="name">{{ row.name }}</span>
+          </button>
+        </li>
+      }
+    </ul>
+  </div>
+</div>

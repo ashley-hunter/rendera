@@ -44,18 +44,15 @@ The authoritative model and all the math, fully unit-tested without a canvas.
   `worldToScreen`/`screenToWorld` + matrices, visible-world-bounds, and the
   anchored ops `panBy`/`zoomAround`/`rotateAround`/`fitBounds`. (DPR deferred to
   the backend.)
-- ⬜ **Selection, spatial index, input (`PointerInput`) + tools.**
-- **Camera & coordinate spaces:** screen/world/local; `screenToWorld` /
-  `worldToScreen` / viewport bounds (DPR deferred to the backend).
-- **Selection model:** object selection (node ids) + a pixel-selection region type.
-- **Spatial index** (quadtree/R-tree) for culling + broad-phase hit testing.
-- **Hit testing:** geometric, via node utils (authoritative, headless).
-- **Input abstraction:** `PointerInput` (type, world/screen, pressure, tilt,
-  coalesced samples); tools as **state machines**; gesture recognizer (pan/zoom/rotate).
-- **Renderer interface:** the seam (`render(scene, camera, dirty)`, optional
-  `pick()`), with no implementation yet.
-- **Showcase:** a headless "model inspector" story (bounds/selection/hit-test
-  visualised with simple DOM/SVG) proving the model before any GPU work.
+- ✅ **Model-inspector showcase:** a Storybook `SceneInspector` (in
+  `@rendera/angular`) drawing the scene with a pure Canvas2D `drawScene`, plus
+  drag-pan, wheel-zoom, click-to-select (`hitTest`), add/delete, and undo/redo —
+  proving the model → view → input → history loop before any GPU work.
+- ⬜ **Selection model:** object selection (node ids) + a pixel-selection region type.
+- ⬜ **Input abstraction:** `PointerInput` (type, world/screen, pressure, tilt,
+  coalesced samples); tools as **state machines**; gesture recognizer.
+- ⬜ **Renderer interface (the seam):** deferred to Phase 2, designed against the
+  WebGPU backend's real requirements rather than the inspector.
 
 ## Phase 2 — WebGPU compositor & colour pipeline (first pixels)  ⬜  → `@rendera/webgpu`
 

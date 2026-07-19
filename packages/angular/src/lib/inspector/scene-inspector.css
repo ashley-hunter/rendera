@@ -1,0 +1,95 @@
+.inspector {
+  display: flex;
+  flex-direction: column;
+  height: 480px;
+  border: 1px solid #333;
+  border-radius: 6px;
+  overflow: hidden;
+  font-family: system-ui, sans-serif;
+  color: #ddd;
+  background: #1e1e1e;
+}
+
+.toolbar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px;
+  background: #262626;
+  border-bottom: 1px solid #333;
+}
+
+.toolbar button {
+  padding: 4px 10px;
+  background: #333;
+  color: #eee;
+  border: 1px solid #444;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 12px;
+}
+
+.toolbar button:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+.hint {
+  margin-left: auto;
+  font-size: 11px;
+  color: #888;
+}
+
+.body {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+}
+
+.canvas {
+  flex: 1;
+  min-width: 0;
+  height: 100%;
+  display: block;
+  cursor: grab;
+  touch-action: none;
+}
+
+.tree {
+  width: 200px;
+  margin: 0;
+  padding: 6px 0;
+  list-style: none;
+  overflow: auto;
+  background: #232323;
+  border-left: 1px solid #333;
+}
+
+.tree li {
+  margin: 0;
+}
+
+.row {
+  display: flex;
+  gap: 6px;
+  width: 100%;
+  padding: 4px 8px;
+  background: transparent;
+  border: none;
+  color: #ccc;
+  text-align: left;
+  cursor: pointer;
+  font-size: 12px;
+}
+
+.row.selected {
+  background: #24405f;
+  color: #fff;
+}
+
+.row .type {
+  color: #7aa2c8;
+  font-size: 10px;
+  text-transform: uppercase;
+  align-self: center;
+}
