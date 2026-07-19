@@ -77,8 +77,10 @@ so backend tests do **pixel readback** to assert colour correctness.
 - 🔨 **Scene quads through the camera:** a pure `buildRenderList(doc, camera)` in
   `@rendera/core` flattens drawable nodes into screen-space quads (debug colours);
   the renderer draws them instanced (premultiplied `over`) into the linear scene
-  target. Readback-tested (a quad lands at the right pixels/colour). *(Next: a
-  **tiled compositor** — tiles, opacity, dirty-tile invalidation.)*
+  target. Readback-tested (a quad lands at the right pixels/colour). Shown on a
+  real canvas via the `WebGpuScene` Storybook story (drag-pan, wheel-zoom, with
+  graceful fallback when WebGPU is unavailable). *(Next: a **tiled compositor** —
+  tiles, opacity, dirty-tile invalidation.)*
 - ⬜ **Raster image layer** (tiled) + **pan/zoom/rotate viewport**: bicubic on
   magnify, trilinear-mip + anisotropic on minify.
 - ⬜ **Showcase:** a crisp image on a pannable/zoomable/rotatable canvas.

@@ -20,20 +20,19 @@ import {
   pointerToWorld,
   pruneSelection,
   resolveSelectionClick,
-  SceneDocument,
   selectionSize,
   selectOnly,
   subtract,
   vec2,
   zoomAround,
   type Camera,
-  type GroupNode,
   type LayerNode,
   type NodeId,
   type SceneNode,
   type Selection,
   type Vec2,
 } from '@rendera/core';
+import { createSampleDocument } from '../sample-scene';
 import { drawScene } from './draw-scene';
 import { toPointerInput } from './pointer-input';
 
@@ -46,35 +45,6 @@ interface TreeRow {
 
 function nodeName(node: SceneNode): string {
   return (node as { name?: string }).name ?? node.type;
-}
-
-function createSampleDocument(): SceneDocument {
-  const doc = SceneDocument.create({ name: 'Inspector' });
-  const group = doc.insert<GroupNode>({
-    type: 'group',
-    name: 'Group',
-    transform: createTransform({ translation: vec2(80, 70) }),
-  });
-  doc.insert<LayerNode>(
-    { type: 'layer', name: 'A', size: vec2(120, 80) },
-    { parentId: group.id }
-  );
-  doc.insert<LayerNode>(
-    {
-      type: 'layer',
-      name: 'B',
-      size: vec2(90, 90),
-      transform: createTransform({ translation: vec2(80, 60), rotation: 0.3 }),
-    },
-    { parentId: group.id }
-  );
-  doc.insert<LayerNode>({
-    type: 'layer',
-    name: 'C',
-    size: vec2(110, 60),
-    transform: createTransform({ translation: vec2(280, 40) }),
-  });
-  return doc;
 }
 
 /**

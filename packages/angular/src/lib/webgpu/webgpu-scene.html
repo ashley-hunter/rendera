@@ -1,0 +1,22 @@
+<div class="webgpu-scene">
+  <div class="toolbar">
+    <button type="button" (click)="fit()" [disabled]="renderState() !== 'ready'">Fit</button>
+    <span class="hint">drag = pan · wheel = zoom · rendered by @rendera/webgpu</span>
+  </div>
+  <div class="stage">
+    <canvas
+      #canvas
+      class="canvas"
+      (pointerdown)="onPointerDown($event)"
+      (pointermove)="onPointerMove($event)"
+      (pointerup)="onPointerUp()"
+      (wheel)="onWheel($event)"
+    ></canvas>
+    @if (renderState() === 'unsupported') {
+      <div class="overlay">
+        <p>WebGPU is not available in this browser.</p>
+        <p class="detail">{{ message() }}</p>
+      </div>
+    }
+  </div>
+</div>
