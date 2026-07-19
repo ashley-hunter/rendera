@@ -18,5 +18,5 @@ export const Default: Story = { args: {} };
  * to see mip + anisotropic minification stay clean instead of shimmering.
  */
 export const CrispImage: Story = {
-  args: { scene: createImageSceneSource(512) },
+  args: { scene: createImageSceneSource() },
 };

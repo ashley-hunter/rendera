@@ -2,10 +2,11 @@ import { SceneDocument, vec2, type ImageNode } from '@rendera/core';
 import type { SceneSource } from './webgpu-scene';
 
 /**
- * Draw a deliberately high-frequency test image: a radial "siren" of thin
- * wedges, fine concentric rings, a hard-edged checker, and crisp text. These
- * are the patterns that expose resampling quality — aliasing/shimmer when
- * minified without mips, and blocky steps when magnified without a good filter.
+ * Draw a high-resolution showcase image with crisp edges, bounded-frequency
+ * detail, a smooth gradient, saturated swatches, and multi-size text — the
+ * content that reads as *crisp*: sharp when magnified (bicubic), clean when
+ * minified (mips), banding-free in the gradient (dither). Deliberately avoids
+ * infinite-frequency detail (e.g. a radial siren) that can only ever moiré.
  */
 function drawTestPattern(size: number): HTMLCanvasElement {
   const canvas = document.createElement('canvas');
@@ -17,44 +18,51 @@ function drawTestPattern(size: number): HTMLCanvasElement {
   }
   const c = size / 2;
 
-  ctx.fillStyle = '#f4f4f5';
+  const grad = ctx.createLinearGradient(0, 0, 0, size);
+  grad.addColorStop(0, '#fbfbfd');
+  grad.addColorStop(1, '#e7e7ee');
+  ctx.fillStyle = grad;
   ctx.fillRect(0, 0, size, size);
 
-  // Radial wedges (a "siren" — very high angular frequency toward the centre).
-  const spokes = 72;
-  for (let i = 0; i < spokes; i++) {
-    ctx.fillStyle = i % 2 === 0 ? '#111114' : '#f4f4f5';
+  // Thin crisp grid.
+  ctx.strokeStyle = 'rgba(30,41,59,0.18)';
+  ctx.lineWidth = Math.max(1, size / 1024);
+  for (let x = 0; x <= size; x += size / 16) {
     ctx.beginPath();
-    ctx.moveTo(c, c);
-    ctx.arc(c, c, size * 0.46, (i / spokes) * 2 * Math.PI, ((i + 1) / spokes) * 2 * Math.PI);
-    ctx.closePath();
-    ctx.fill();
+    ctx.moveTo(x, 0);
+    ctx.lineTo(x, size);
+    ctx.stroke();
+    ctx.beginPath();
+    ctx.moveTo(0, x);
+    ctx.lineTo(size, x);
+    ctx.stroke();
   }
 
-  // Fine concentric rings.
-  ctx.strokeStyle = '#2563eb';
-  for (let r = 6; r < size * 0.46; r += 6) {
-    ctx.lineWidth = 1;
+  // Bounded-frequency concentric rings (fixed spacing — never converge).
+  ctx.strokeStyle = '#1e3a8a';
+  ctx.lineWidth = Math.max(2, size / 340);
+  for (let r = size * 0.08; r < size * 0.46; r += size * 0.05) {
     ctx.beginPath();
     ctx.arc(c, c, r, 0, 2 * Math.PI);
     ctx.stroke();
   }
 
-  // A hard-edged checker in the corner.
-  const cell = Math.max(2, Math.round(size / 32));
-  for (let y = 0; y < 8; y++) {
-    for (let x = 0; x < 8; x++) {
-      ctx.fillStyle = (x + y) % 2 === 0 ? '#dc2626' : '#fde047';
-      ctx.fillRect(x * cell, y * cell, cell, cell);
-    }
-  }
+  // Saturated colour swatches.
+  const cols = ['#ef4444', '#f59e0b', '#22c55e', '#3b82f6', '#a855f7', '#ec4899'];
+  const sw = size / cols.length;
+  cols.forEach((col, i) => {
+    ctx.fillStyle = col;
+    ctx.fillRect(i * sw, size * 0.8, sw, size * 0.12);
+  });
 
-  // Crisp text to judge magnification sharpness.
-  ctx.fillStyle = '#111114';
-  ctx.font = `${Math.round(size * 0.09)}px system-ui, sans-serif`;
+  // Crisp text at two sizes, to judge magnification sharpness.
+  ctx.fillStyle = '#0f172a';
   ctx.textAlign = 'center';
   ctx.textBaseline = 'middle';
+  ctx.font = `700 ${Math.round(size * 0.11)}px system-ui, sans-serif`;
   ctx.fillText('RENDERA', c, c);
+  ctx.font = `500 ${Math.round(size * 0.032)}px system-ui, sans-serif`;
+  ctx.fillText('WebGPU · linear-light · bicubic', c, c + size * 0.09);
 
   return canvas;
 }
@@ -64,7 +72,7 @@ function drawTestPattern(size: number): HTMLCanvasElement {
  * high-frequency test pattern, so zooming in shows bicubic-smooth magnification
  * and zooming out shows mip/anisotropic-clean minification.
  */
-export function createImageSceneSource(size = 512): SceneSource {
+export function createImageSceneSource(size = 1024): SceneSource {
   const assetId = 'test-pattern';
   const doc = SceneDocument.create({ name: 'Image' });
   doc.insert<ImageNode>({
