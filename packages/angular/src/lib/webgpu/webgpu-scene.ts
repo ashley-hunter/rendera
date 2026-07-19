@@ -73,6 +73,8 @@ export class WebGpuScene {
   private resizeObserver?: ResizeObserver;
   private readonly gesture = new ViewportGesture();
   private frame = 0;
+  private interacting = false;
+  private idleTimer?: ReturnType<typeof setTimeout>;
 
   /** Device-init state: 'pending' -> 'ready' | 'unsupported'. */
   readonly renderState = signal<Status>('pending');
@@ -166,6 +168,7 @@ export class WebGpuScene {
     }
     const change = this.gesture.move(event.pointerId, this.toCanvas(event, canvas));
     if (change) {
+      this.beginInteraction();
       this.applyGesture(change);
     }
   }
@@ -180,9 +183,31 @@ export class WebGpuScene {
     if (!canvas) {
       return;
     }
+    this.beginInteraction();
     const anchor = this.toCanvas(event, canvas);
     this.camera.update((c) => zoomAround(c, anchor, event.deltaY < 0 ? 1.1 : 1 / 1.1));
     this.draw();
+  }
+
+  /**
+   * Drop to 1x supersampling while the user pans/zooms (analytic vector AA needs
+   * no SSAA, so motion stays crisp), then restore full 2x quality once idle.
+   * A ~180ms debounce means the switch happens on interaction start/end, not
+   * per frame.
+   */
+  private beginInteraction(): void {
+    if (!this.interacting) {
+      this.interacting = true;
+      this.renderer?.setSupersample(1);
+    }
+    if (this.idleTimer !== undefined) {
+      clearTimeout(this.idleTimer);
+    }
+    this.idleTimer = setTimeout(() => {
+      this.interacting = false;
+      this.renderer?.setSupersample(2);
+      this.draw();
+    }, 180);
   }
 
   /** Apply a recognizer change (single-finger pan or two-finger pinch) to the camera. */

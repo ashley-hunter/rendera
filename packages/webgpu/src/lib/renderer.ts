@@ -445,11 +445,17 @@ fn windQuad(p : vec2f, A : vec2f, B : vec2f, C : vec2f) -> i32 {
   var dist = 1e9;
   for (var i = 0u; i < count; i = i + 1u) {
     let e = edges[offset + i];
+    // Winding always (cheap, and every edge on the scanline matters); the exact
+    // distance (expensive SDF) only matters near the boundary, so skip it for
+    // edges whose bbox is comfortably far from this pixel.
+    let lo = min(min(e.a, e.b), e.c) - vec2f(2.0);
+    let hi = max(max(e.a, e.b), e.c) + vec2f(2.0);
+    let near = p.x >= lo.x && p.x <= hi.x && p.y >= lo.y && p.y <= hi.y;
     if (e.kind.x > 0.5) {
-      dist = min(dist, dQuad(p, e.a, e.b, e.c));
+      if (near) { dist = min(dist, dQuad(p, e.a, e.b, e.c)); }
       winding = winding + windQuad(p, e.a, e.b, e.c);
     } else {
-      dist = min(dist, dLine(p, e.a, e.c));
+      if (near) { dist = min(dist, dLine(p, e.a, e.c)); }
       winding = winding + windLine(p, e.a, e.c);
     }
   }
@@ -470,7 +476,8 @@ export class WebGpuRenderer {
   private width: number;
   private height: number;
   /** Requested supersample factor; the effective one may be clamped by limits. */
-  private readonly supersample: number;
+  /** Requested supersample factor (adjustable live via `setSupersample`). */
+  private supersample: number;
   /** Effective (clamped) supersample factor actually in use. */
   private sampleScale = 1;
   private ditherEnabled = false;
@@ -540,6 +547,23 @@ export class WebGpuRenderer {
   /** The effective supersample factor in use (may be clamped below the request). */
   get scale(): number {
     return this.sampleScale;
+  }
+
+  /**
+   * Change the supersample factor live (e.g. 1 during interaction for speed, 2
+   * when idle for quality). Reallocates the target pool; cheap enough to toggle
+   * on interaction start/end, not per frame.
+   */
+  setSupersample(factor: number): void {
+    const f = Math.max(1, Math.floor(factor));
+    if (f === this.supersample) {
+      return;
+    }
+    this.supersample = f;
+    this.sampleScale = this.computeScale();
+    this.destroyTargetPool();
+    this.updateViewport();
+    this.writeParams();
   }
 
   static async create(
