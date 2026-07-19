@@ -51,6 +51,12 @@ pnpm nx test core
 pnpm nx storybook angular
 ```
 
+`@rendera/core` tests run headless in Node; `@rendera/angular` component tests
+run in **Vitest browser mode** (Chromium via Playwright) to avoid jsdom's
+limitations. Install the browser once with `pnpm exec playwright install
+chromium`; in environments with a pre-provisioned Chromium, point the runner at
+it with `CHROME_BIN=/path/to/chrome`.
+
 Storybook showcases the library's capabilities and is published to GitHub Pages
 on every push to `main`.
 

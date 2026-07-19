@@ -35,5 +35,10 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
+      # Angular component tests run in Vitest browser mode (Chromium via
+      # Playwright), so install the browser and its OS dependencies.
+      - name: Install Playwright Chromium
+        run: pnpm exec playwright install --with-deps chromium
+
       - name: Lint, test and build all libraries
         run: pnpm nx run-many -t lint test build --parallel=3
