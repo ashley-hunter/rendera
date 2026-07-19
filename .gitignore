@@ -49,3 +49,6 @@ vitest.config.*.timestamp*
 .angular
 
 __screenshots__/
+
+
+storybook-static
