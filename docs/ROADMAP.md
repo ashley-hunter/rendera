@@ -105,15 +105,21 @@ so backend tests do **pixel readback** to assert colour correctness.
   constraining raster ops ("marching ants").
 - **Showcase:** transform-handles and selection demos (desktop + touch gestures).
 
-## Phase 5 — Vector layer & tools  ⬜  → `@rendera/vector`
+## Phase 5 — Vector layer & tools  🔨  → `@rendera/vector`
 
-- **Path/shape model** (Bézier); fills / strokes / gradients (interpolated in
-  linear/OKLab); boolean ops.
-- **Analytic-quality vector rasterization** into the tile grid — evaluate a
-  compute-based coverage path vs a triangle-patch + coverage-accumulation pass
-  (tessellation is the known WebGL2-fallback shape). Decide via a spike; record an ADR.
-- **Text:** MSDF atlas for zoomable UI text + a high-quality path for large/display type.
-- **Showcase:** resolution-independent vector drawing that stays crisp at any zoom.
+- ✅ **Rasterization decided (ADR 0007):** exact-quadratic **analytic coverage**
+  (resolution-independent AA), GPU-exact curves (no flattening), cubics converted
+  to quadratics to sub-pixel tolerance, generic `path` node. A spike proved the
+  Loop–Blinn implicit + derivative-coverage method on WebGPU: the AA rim scales
+  with perimeter (~2×), not area (~4×) — a constant ~1px analytic edge.
+- ⬜ **Path/shape model** (`path` node + primitive helpers); **solid fills first**
+  (gradients interpolated in linear/OKLab, and strokes, are follow-ups); boolean ops.
+- ⬜ **Analytic fill rasterizer:** per-layer exact coverage from quadratic + line
+  segments (nonzero / even-odd), modulating a linear fill, composited through the
+  backdrop-read compositor. *(Straight-edge coverage is the remaining easy case;
+  the spike proved the curved case.)*
+- ⬜ **Text:** MSDF atlas for zoomable UI text + a high-quality path for large/display type.
+- ⬜ **Showcase:** resolution-independent vector drawing that stays crisp at any zoom.
 
 ## Phase 6 — Effects & non-destructive stack  ⬜  → `@rendera/effects`
 
