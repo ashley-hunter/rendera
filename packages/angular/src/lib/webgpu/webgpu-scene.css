@@ -40,6 +40,14 @@
   color: #888;
 }
 
+.fps {
+  font-family: ui-monospace, monospace;
+  font-size: 11px;
+  color: #7fd18b;
+  min-width: 52px;
+  text-align: right;
+}
+
 .stage {
   position: relative;
   flex: 1;

@@ -75,6 +75,10 @@ export class WebGpuScene {
   private frame = 0;
   private interacting = false;
   private idleTimer?: ReturnType<typeof setTimeout>;
+  private lastFrameTime = 0;
+
+  /** Smoothed frames-per-second of the render loop (0 until the first frames). */
+  readonly fps = signal(0);
 
   /** Device-init state: 'pending' -> 'ready' | 'unsupported'. */
   readonly renderState = signal<Status>('pending');
@@ -276,5 +280,17 @@ export class WebGpuScene {
     const camera = withPixelRatio(this.camera(), this.pixelRatio());
     this.renderer.setRenderList(buildRenderList(this.document, camera));
     this.renderer.render();
+    this.recordFrame();
+  }
+
+  /** Update the smoothed FPS readout from the interval between rendered frames. */
+  private recordFrame(): void {
+    const now = typeof performance !== 'undefined' ? performance.now() : 0;
+    const dt = now - this.lastFrameTime;
+    this.lastFrameTime = now;
+    if (dt > 0 && dt < 500) {
+      const instant = 1000 / dt;
+      this.fps.update((v) => (v ? Math.round(v * 0.85 + instant * 0.15) : Math.round(instant)));
+    }
   }
 }

@@ -1218,16 +1218,42 @@ export class WebGpuRenderer {
     let pathCursor = 0;
     let blendSlot = 0;
 
+    // Consecutive Normal draws onto the same target share ONE render pass, so
+    // the (large, supersampled) target is load+stored once per run rather than
+    // once per layer — the dominant bandwidth cost otherwise.
+    let openPass: GPURenderPassEncoder | null = null;
+    let openTarget: GPUTexture | null = null;
+    const flush = (): void => {
+      if (openPass) {
+        openPass.end();
+        openPass = null;
+        openTarget = null;
+      }
+    };
+    const passFor = (tex: GPUTexture): GPURenderPassEncoder => {
+      if (openPass && openTarget === tex) {
+        return openPass;
+      }
+      flush();
+      openPass = encoder.beginRenderPass({
+        colorAttachments: [{ view: tex.createView(), loadOp: 'load', storeOp: 'store' }],
+      });
+      openTarget = tex;
+      return openPass;
+    };
+
     for (const cmd of this.commands) {
       const top = stack[stack.length - 1];
 
       if (cmd.op === 'push-group') {
+        flush();
         const target = this.acquireTarget();
         this.clearTarget(encoder, target, { r: 0, g: 0, b: 0, a: 0 });
         stack.push({ tex: target, opacity: cmd.opacity, mode: blendModeIndex(cmd.blend) });
         continue;
       }
       if (cmd.op === 'pop-group') {
+        flush();
         const group = stack.pop();
         const parent = stack[stack.length - 1];
         if (!group || !parent) {
@@ -1244,11 +1270,15 @@ export class WebGpuRenderer {
       // A leaf draw (solid, image, or vector path).
       const index = cmd.op === 'draw-solid' ? solidCursor : cmd.op === 'draw-image' ? imageCursor : pathCursor;
       if (cmd.blend === 'normal') {
-        this.drawLeaf(encoder, cmd, top.tex, index, 'load');
+        this.drawLeafInto(passFor(top.tex), cmd, index);
       } else {
+        flush();
         const source = this.acquireTarget();
-        this.clearTarget(encoder, source, { r: 0, g: 0, b: 0, a: 0 });
-        this.drawLeaf(encoder, cmd, source, index, 'load');
+        const spass = encoder.beginRenderPass({
+          colorAttachments: [{ view: source.createView(), loadOp: 'clear', storeOp: 'store', clearValue: { r: 0, g: 0, b: 0, a: 0 } }],
+        });
+        this.drawLeafInto(spass, cmd, index);
+        spass.end();
         const dest = this.acquireTarget();
         // Opacity is already baked into the source, so blend at opacity 1.
         this.blendPass(encoder, dest, top.tex, source, blendModeIndex(cmd.blend), 1, blendSlot++);
@@ -1265,32 +1295,23 @@ export class WebGpuRenderer {
       }
     }
 
+    flush();
     return stack[0].tex;
   }
 
-  /** Draw one leaf (solid or image) into `target` with fixed-function `over`. */
-  private drawLeaf(
-    encoder: GPUCommandEncoder,
-    cmd: RenderCommand,
-    target: GPUTexture,
-    index: number,
-    loadOp: GPULoadOp
-  ): void {
+  /** Record one leaf (solid / image / path) into an open pass (fixed-func over). */
+  private drawLeafInto(pass: GPURenderPassEncoder, cmd: RenderCommand, index: number): void {
     if (cmd.op === 'draw-image') {
       const cached = this.imageCache.get(cmd.assetId);
       if (!cached || !this.imageBuffer) {
         return; // asset not registered yet
       }
-      const pass = encoder.beginRenderPass({
-        colorAttachments: [{ view: target.createView(), loadOp, storeOp: 'store', clearValue: { r: 0, g: 0, b: 0, a: 0 } }],
-      });
       pass.setPipeline(this.image.pipeline);
       pass.setBindGroup(0, this.quadBindGroup);
       pass.setBindGroup(1, cached.bindGroup);
       pass.setVertexBuffer(0, this.unitQuadBuffer);
       pass.setVertexBuffer(1, this.imageBuffer);
       pass.draw(4, 1, 0, index);
-      pass.end();
       return;
     }
     if (cmd.op === 'draw-path') {
@@ -1306,29 +1327,21 @@ export class WebGpuRenderer {
           { binding: 3, resource: { buffer: this.edgeIndexBuffer } },
         ],
       });
-      const pass = encoder.beginRenderPass({
-        colorAttachments: [{ view: target.createView(), loadOp, storeOp: 'store', clearValue: { r: 0, g: 0, b: 0, a: 0 } }],
-      });
       pass.setPipeline(this.pathResources.pipeline);
       pass.setBindGroup(0, this.pathResources.viewportBindGroup);
       pass.setBindGroup(1, bindGroup);
       pass.setVertexBuffer(0, this.unitQuadBuffer);
       pass.draw(4);
-      pass.end();
       return;
     }
     if (!this.solidBuffer) {
       return;
     }
-    const pass = encoder.beginRenderPass({
-      colorAttachments: [{ view: target.createView(), loadOp, storeOp: 'store', clearValue: { r: 0, g: 0, b: 0, a: 0 } }],
-    });
     pass.setPipeline(this.quadPipeline);
     pass.setBindGroup(0, this.quadBindGroup);
     pass.setVertexBuffer(0, this.unitQuadBuffer);
     pass.setVertexBuffer(1, this.solidBuffer);
     pass.draw(4, 1, 0, index);
-    pass.end();
   }
 
   /** Composite `source` over `backdrop` into `dest` via the blend shader. */

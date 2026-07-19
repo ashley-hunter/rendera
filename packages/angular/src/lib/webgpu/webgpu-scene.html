@@ -2,6 +2,9 @@
   <div class="toolbar">
     <button type="button" (click)="fit()" [disabled]="renderState() !== 'ready'">Fit</button>
     <span class="hint">drag = pan · wheel / pinch = zoom · rendered by @rendera/webgpu</span>
+    @if (renderState() === 'ready') {
+      <span class="fps">{{ fps() }} fps</span>
+    }
   </div>
   <div class="stage">
     <canvas
