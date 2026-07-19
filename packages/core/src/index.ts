@@ -20,6 +20,7 @@ export * from './lib/transform';
 export * from './lib/bounds';
 export * from './lib/camera';
 export * from './lib/pointer';
+export * from './lib/gesture';
 export * from './lib/selection';
 export {
   IDENTITY,

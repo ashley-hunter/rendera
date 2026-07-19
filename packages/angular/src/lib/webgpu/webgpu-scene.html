@@ -1,7 +1,7 @@
 <div class="webgpu-scene">
   <div class="toolbar">
     <button type="button" (click)="fit()" [disabled]="renderState() !== 'ready'">Fit</button>
-    <span class="hint">drag = pan · wheel = zoom · rendered by @rendera/webgpu</span>
+    <span class="hint">drag = pan · wheel / pinch = zoom · rendered by @rendera/webgpu</span>
   </div>
   <div class="stage">
     <canvas
@@ -9,7 +9,8 @@
       class="canvas"
       (pointerdown)="onPointerDown($event)"
       (pointermove)="onPointerMove($event)"
-      (pointerup)="onPointerUp()"
+      (pointerup)="onPointerUp($event)"
+      (pointercancel)="onPointerUp($event)"
       (wheel)="onWheel($event)"
     ></canvas>
     @if (renderState() === 'unsupported') {

@@ -22,15 +22,15 @@ import {
   resolveSelectionClick,
   selectionSize,
   selectOnly,
-  subtract,
   vec2,
+  ViewportGesture,
   zoomAround,
   type Camera,
   type LayerNode,
   type NodeId,
   type SceneNode,
   type Selection,
-  type Vec2,
+  type ViewportGestureChange,
 } from '@rendera/core';
 import { createSampleDocument } from '../sample-scene';
 import { drawScene } from './draw-scene';
@@ -72,9 +72,8 @@ export class SceneInspector {
   private readonly revision = signal(0);
 
   private layerCounter = 0;
-  private dragging = false;
+  private readonly gesture = new ViewportGesture();
   private moved = false;
-  private lastScreen: Vec2 | null = null;
   private resizeObserver?: ResizeObserver;
 
   protected readonly hasSelection = computed(
@@ -195,31 +194,34 @@ export class SceneInspector {
     } catch {
       // Ignore: the pointer may not be active (e.g. a synthetic event in tests).
     }
-    this.dragging = true;
-    this.moved = false;
-    this.lastScreen = toPointerInput(event, canvas, 'down').screen;
+    const screen = toPointerInput(event, canvas, 'down').screen;
+    this.gesture.down(event.pointerId, screen);
+    // A fresh single-finger touch may still be a tap; a second finger never is.
+    this.moved = this.gesture.activeCount > 1;
   }
 
   protected onPointerMove(event: PointerEvent): void {
     const canvas = this.canvasRef()?.nativeElement;
-    if (!this.dragging || !this.lastScreen || !canvas) {
+    if (!canvas) {
       return;
     }
     const screen = toPointerInput(event, canvas, 'move').screen;
-    const delta = subtract(screen, this.lastScreen);
-    if (Math.abs(delta.x) + Math.abs(delta.y) > 2) {
+    const change = this.gesture.move(event.pointerId, screen);
+    if (!change) {
+      return;
+    }
+    if (Math.abs(change.pan.x) + Math.abs(change.pan.y) > 2 || change.zoom !== 1) {
       this.moved = true;
     }
-    this.camera.update((c) => panBy(c, delta));
-    this.lastScreen = screen;
+    this.applyGesture(change);
   }
 
   protected onPointerUp(event: PointerEvent): void {
     const canvas = this.canvasRef()?.nativeElement;
-    const wasDrag = this.moved;
-    this.dragging = false;
-    this.lastScreen = null;
-    if (wasDrag || !canvas) {
+    // A tap is a single finger lifting with no pan/pinch in between.
+    const isTap = !this.moved && this.gesture.activeCount === 1;
+    this.gesture.up(event.pointerId);
+    if (!isTap || !canvas) {
       return;
     }
     const input = toPointerInput(event, canvas, 'up');
@@ -232,6 +234,11 @@ export class SceneInspector {
     );
   }
 
+  protected onPointerCancel(event: PointerEvent): void {
+    this.moved = true;
+    this.gesture.up(event.pointerId);
+  }
+
   protected onWheel(event: WheelEvent): void {
     event.preventDefault();
     const canvas = this.canvasRef()?.nativeElement;
@@ -242,6 +249,14 @@ export class SceneInspector {
     const anchor = vec2(event.clientX - rect.left, event.clientY - rect.top);
     const factor = event.deltaY < 0 ? 1.1 : 1 / 1.1;
     this.camera.update((c) => zoomAround(c, anchor, factor));
+  }
+
+  /** Apply a recognizer change (single-finger pan or two-finger pinch) to the camera. */
+  private applyGesture(change: ViewportGestureChange): void {
+    this.camera.update((c) => {
+      const panned = panBy(c, change.pan);
+      return change.zoom === 1 ? panned : zoomAround(panned, change.anchor, change.zoom);
+    });
   }
 
   private resize(): void {

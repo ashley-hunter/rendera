@@ -11,11 +11,12 @@ import {
   createCamera,
   fitBounds,
   panBy,
-  subtract,
   vec2,
+  ViewportGesture,
   zoomAround,
   type Camera,
   type Vec2,
+  type ViewportGestureChange,
 } from '@rendera/core';
 import { WebGpuRenderer } from '@rendera/webgpu';
 import { createSampleDocument } from '../sample-scene';
@@ -44,8 +45,7 @@ export class WebGpuScene {
   private readonly camera = signal<Camera>(createCamera({ pan: vec2(20, 20) }));
   private renderer: WebGpuRenderer | null = null;
   private resizeObserver?: ResizeObserver;
-  private lastScreen: Vec2 | null = null;
-  private dragging = false;
+  private readonly gesture = new ViewportGesture();
   private frame = 0;
 
   /** Device-init state: 'pending' -> 'ready' | 'unsupported'. */
@@ -112,24 +112,22 @@ export class WebGpuScene {
     } catch {
       // Ignore non-active pointers (e.g. synthetic events).
     }
-    this.dragging = true;
-    this.lastScreen = this.toCanvas(event, canvas);
+    this.gesture.down(event.pointerId, this.toCanvas(event, canvas));
   }
 
   protected onPointerMove(event: PointerEvent): void {
     const canvas = this.canvasRef()?.nativeElement;
-    if (!this.dragging || !this.lastScreen || !canvas) {
+    if (!canvas) {
       return;
     }
-    const screen = this.toCanvas(event, canvas);
-    this.camera.update((c) => panBy(c, subtract(screen, this.lastScreen as Vec2)));
-    this.lastScreen = screen;
-    this.draw();
+    const change = this.gesture.move(event.pointerId, this.toCanvas(event, canvas));
+    if (change) {
+      this.applyGesture(change);
+    }
   }
 
-  protected onPointerUp(): void {
-    this.dragging = false;
-    this.lastScreen = null;
+  protected onPointerUp(event: PointerEvent): void {
+    this.gesture.up(event.pointerId);
   }
 
   protected onWheel(event: WheelEvent): void {
@@ -140,6 +138,15 @@ export class WebGpuScene {
     }
     const anchor = this.toCanvas(event, canvas);
     this.camera.update((c) => zoomAround(c, anchor, event.deltaY < 0 ? 1.1 : 1 / 1.1));
+    this.draw();
+  }
+
+  /** Apply a recognizer change (single-finger pan or two-finger pinch) to the camera. */
+  private applyGesture(change: ViewportGestureChange): void {
+    this.camera.update((c) => {
+      const panned = panBy(c, change.pan);
+      return change.zoom === 1 ? panned : zoomAround(panned, change.anchor, change.zoom);
+    });
     this.draw();
   }
 

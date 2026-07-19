@@ -7,7 +7,7 @@
     <button type="button" (click)="undo()" [disabled]="!canUndo()">Undo</button>
     <button type="button" (click)="redo()" [disabled]="!canRedo()">Redo</button>
     <button type="button" (click)="fit()">Fit</button>
-    <span class="hint">drag = pan · wheel = zoom · click = select</span>
+    <span class="hint">drag = pan · wheel / pinch = zoom · click = select</span>
   </div>
   <div class="body">
     <canvas
@@ -16,6 +16,7 @@
       (pointerdown)="onPointerDown($event)"
       (pointermove)="onPointerMove($event)"
       (pointerup)="onPointerUp($event)"
+      (pointercancel)="onPointerCancel($event)"
       (wheel)="onWheel($event)"
     ></canvas>
     <ul class="tree">
