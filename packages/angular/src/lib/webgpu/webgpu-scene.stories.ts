@@ -1,4 +1,5 @@
 import type { Meta, StoryObj } from '@storybook/angular';
+import { createAdjustmentsScene } from './adjustments-scene';
 import { createBlendScene } from './blend-scene';
 import { createBooleanScene } from './boolean-scene';
 import { createClipMaskScene } from './clip-mask-scene';
@@ -116,4 +117,14 @@ export const ClipAndMask: Story = {
  */
 export const Effects: Story = {
   args: { scene: createEffectsScene() },
+};
+
+/**
+ * Adjustment layers (ADR 0013): the same spectrum subject repeated with six
+ * different non-destructive colour adjustments — original, brightness, contrast,
+ * desaturate, hue shift, and a levels curve. Parametric op-lists evaluated at
+ * render in linear light; nothing is baked.
+ */
+export const Adjustments: Story = {
+  args: { scene: createAdjustmentsScene() },
 };

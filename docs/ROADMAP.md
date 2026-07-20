@@ -169,7 +169,9 @@ so backend tests do **pixel readback** to assert colour correctness.
 
 - ✅ **Layer effects (ADR 0012):** blur, drop shadow, glow as parametric op-lists
   evaluated at render — never baked (shipped early on the vector layer).
-- **Adjustment layers** (curves, levels, hue/sat), and inner shadow/glow.
+- ✅ **Adjustments (ADR 0013):** brightness/contrast, hue/saturation, levels as
+  further entries in the same `effects[]` list (one linear-light colour pass).
+- **Remaining:** arbitrary curves (spline LUT) + per-channel, inner shadow/glow.
 - **Effect DAG caching** keyed by content hash + dirty flags; correct **group
   isolation** for non-separable blends.
 - **Showcase:** a non-destructive effect stack that stays fully re-editable.
