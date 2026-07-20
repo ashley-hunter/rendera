@@ -99,6 +99,14 @@ export interface DrawPathCommand {
    * internal seam at high zoom.
    */
   readonly hardInterior?: boolean;
+  /**
+   * Distance-field stroke half-width, in screen (device-edge) px. When > 0 the
+   * backend ignores winding and paints coverage where the distance to the
+   * nearest edge is ≤ this — i.e. the edges are the stroke *centerline*, not an
+   * offset outline. Gives exact, resolution-independent round-joined strokes
+   * with no offset geometry (so no faceting or self-intersection artifacts).
+   */
+  readonly strokeHalf?: number;
 }
 
 /** One MSDF glyph quad: a unit-square→screen transform + its atlas UV rect. */
@@ -256,7 +264,22 @@ interface PreparedGeom {
 interface GeomEntry {
   sig: string;
   fill: readonly PreparedGeom[];
+  /** Geometric stroke outline (offset polygons), for non-round joins/caps. */
   stroke: readonly PreparedGeom[];
+  /** Resolved stroke *centerline* clusters, for distance-field round strokes. */
+  centerline: readonly PreparedGeom[];
+}
+
+/** Whether every subpath is closed (so a stroke has no caps — round-join
+ * distance-field stroking is then exact regardless of the cap setting). */
+function allClosed(path: Path): boolean {
+  return path.subpaths.every(
+    (sp) => sp.closed || (sp.segments.length > 0 && (() => {
+      let cur = sp.start;
+      for (const s of sp.segments) cur = s.to;
+      return Math.hypot(cur.x - sp.start.x, cur.y - sp.start.y) < 1e-6;
+    })())
+  );
 }
 
 /** Do two AABBs overlap (with a small pad so touching bboxes group)? */
@@ -509,6 +532,7 @@ export function buildRenderList(
     const fill = prepareClusters(toQuadraticPath(localPath, tol));
 
     let strokeGeom: PreparedGeom[] = [];
+    let centerline: PreparedGeom[] = [];
     if (stroke) {
       // Stroke the shape's *resolved* outline, not the raw contours. Fonts (and
       // hand-drawn art) routinely self-overlap — a glyph's crossbar running back
@@ -516,22 +540,23 @@ export function buildRenderList(
       // stroking would ink as spurious seams deep inside the shape. Removing the
       // overlaps first leaves only the visible edge to stroke.
       const strokeSource = resolveOverlaps(localPath);
-      // Flatten/round the stroke at the SAME tolerance as the fill. Stroking's
-      // default is 5x coarser, which at high zoom shows as faceted edges and
-      // chunky (octagonal) round joins — ragged "borders" inside a stroked glyph.
-      const outline = strokePath(
-        strokeSource,
-        {
-          width: stroke.width,
-          cap: stroke.cap,
-          join: stroke.join,
-          miterLimit: stroke.miterLimit,
-        },
-        tol
-      );
-      strokeGeom = prepareClusters(outline);
+      const round = (stroke.join ?? 'miter') === 'round' && ((stroke.cap ?? 'butt') === 'round' || allClosed(localPath));
+      if (round) {
+        // Round strokes render as a distance field over the centerline — exact
+        // and resolution-independent, no offset geometry (so nothing to facet or
+        // self-intersect). Just the resolved outline's own edges.
+        centerline = prepareClusters(toQuadraticPath(strokeSource, tol));
+      } else {
+        // Miter/bevel/square need real corner geometry: build the offset outline.
+        const outline = strokePath(
+          strokeSource,
+          { width: stroke.width, cap: stroke.cap, join: stroke.join, miterLimit: stroke.miterLimit },
+          tol
+        );
+        strokeGeom = prepareClusters(outline);
+      }
     }
-    const entry: GeomEntry = { sig, fill, stroke: strokeGeom };
+    const entry: GeomEntry = { sig, fill, stroke: strokeGeom, centerline };
     geomCache.set(id, entry);
     return entry;
   };
@@ -576,6 +601,7 @@ export function buildRenderList(
     }
 
     if (stroke) {
+      // Geometric outline (non-round joins): filled like any path.
       for (const c of geom.stroke) {
         commands.push({
           op: 'draw-path',
@@ -589,6 +615,29 @@ export function buildRenderList(
           bounds: transformBoundsAabb(c.bounds, screenMat),
           hardInterior: true,
         });
+      }
+      // Distance-field stroke (round joins/caps): the centerline edges plus a
+      // half-width; the backend paints coverage where distance ≤ half. Width is
+      // local, so it scales to screen (device-edge) px by the transform's scale.
+      if (geom.centerline.length > 0) {
+        const det = screenMat.a * screenMat.d - screenMat.b * screenMat.c;
+        const screenScale = Math.sqrt(Math.abs(det)) || 1;
+        const strokeHalf = (stroke.width / 2) * screenScale;
+        for (const c of geom.centerline) {
+          const b = transformBoundsAabb(c.bounds, screenMat);
+          commands.push({
+            op: 'draw-path',
+            nodeId: id,
+            paint: stroke.paint,
+            screenToLocal,
+            fillRule: 'nonzero',
+            opacity,
+            blend,
+            edges: transformEdges(c.edges, screenMat),
+            bounds: { minX: b.minX - strokeHalf, minY: b.minY - strokeHalf, maxX: b.maxX + strokeHalf, maxY: b.maxY + strokeHalf },
+            strokeHalf,
+          });
+        }
       }
     }
   };

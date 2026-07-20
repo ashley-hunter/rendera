@@ -532,6 +532,7 @@ struct PathParams {
   inv0 : vec4f,
   inv1 : vec4f,
   grad : vec4u,
+  stroke : vec4f, // x = distance-field stroke half-width (device px), 0 = fill
 };
 @group(1) @binding(1) var<uniform> pp : PathParams;
 // Row-band acceleration: bandTable[bandTableOffset + row] = (indexOffset, count)
@@ -775,6 +776,8 @@ fn paintColor(p : vec2f) -> vec4f {
 
 @fragment fn fs(@builtin(position) frag : vec4f) -> @location(0) vec4f {
   let p = frag.xy / vp.scale; // target px -> device px (edge space)
+  let strokeHalf = pp.stroke.x; // > 0 → distance-field stroke over the centerline
+  let reach = select(2.0, strokeHalf + 2.0, strokeHalf > 0.0);
   // Pick this pixel's horizontal band and iterate only its edges.
   let bandCount = i32(pp.counts.z);
   var row = i32(floor((p.y - pp.misc.y) / pp.misc.z));
@@ -786,30 +789,36 @@ fn paintColor(p : vec2f) -> vec4f {
   var dist = 1e9;
   for (var j = 0u; j < cnt; j = j + 1u) {
     let e = edges[edgeIndex[idxOffset + j]];
-    // Winding always (cheap); the exact distance SDF only matters near the
-    // boundary, so skip it for edges whose bbox is far from this pixel.
-    let lo = min(min(e.a, e.b), e.c) - vec2f(2.0);
-    let hi = max(max(e.a, e.b), e.c) + vec2f(2.0);
+    // The exact distance SDF only matters within reach of the pixel: for a
+    // fill that's the ~1px AA rim, for a stroke it's the whole half-width band.
+    let lo = min(min(e.a, e.b), e.c) - vec2f(reach);
+    let hi = max(max(e.a, e.b), e.c) + vec2f(reach);
     // Band edges are sorted by max-X descending: once one is entirely left of
-    // this pixel, so is every edge after it — none can cross the rightward ray
-    // or reach the rim, so stop.
+    // this pixel's reach, so is every edge after it — stop.
     if (hi.x < p.x) { break; }
     let near = p.x >= lo.x && p.x <= hi.x && p.y >= lo.y && p.y <= hi.y;
     if (e.kind.x > 0.5) {
       if (near) { dist = min(dist, dQuad(p, e.a, e.b, e.c)); }
-      winding = winding + windQuad(p, e.a, e.b, e.c);
+      if (strokeHalf == 0.0) { winding = winding + windQuad(p, e.a, e.b, e.c); }
     } else {
       if (near) { dist = min(dist, dLine(p, e.a, e.c)); }
-      winding = winding + windLine(p, e.a, e.c);
+      if (strokeHalf == 0.0) { winding = winding + windLine(p, e.a, e.c); }
     }
   }
-  var inside = winding != 0;
-  if (pp.counts.x == 1u) { inside = (winding & 1) != 0; }
-  let signed = select(dist, -dist, inside);
-  var coverage = clamp(0.5 - signed, 0.0, 1.0); // ~1 device-px analytic rim
-  // Self-overlapping fills (stroke outlines): keep the interior solid so the AA
-  // rim appears only at the true outer/inner boundary, not internal seams.
-  if (pp.misc.w > 0.5 && inside) { coverage = 1.0; }
+  var coverage : f32;
+  if (strokeHalf > 0.0) {
+    // Distance-field stroke: covered where distance to the centerline ≤ half,
+    // with a ~1 device-px analytic edge. Round joins/caps for free.
+    coverage = clamp(0.5 + (strokeHalf - dist), 0.0, 1.0);
+  } else {
+    var inside = winding != 0;
+    if (pp.counts.x == 1u) { inside = (winding & 1) != 0; }
+    let signed = select(dist, -dist, inside);
+    coverage = clamp(0.5 - signed, 0.0, 1.0); // ~1 device-px analytic rim
+    // Self-overlapping fills (stroke outlines): keep the interior solid so the
+    // AA rim appears only at the true boundary, not internal seams.
+    if (pp.misc.w > 0.5 && inside) { coverage = 1.0; }
+  }
   let paint = paintColor(p);
   let alpha = paint.a * pp.misc.x * coverage;
   return vec4f(paint.rgb * alpha, alpha); // premultiplied linear
@@ -1565,14 +1574,18 @@ export class WebGpuRenderer {
           edges.push(e.a.x, e.a.y, e.b.x, e.b.y, e.c.x, e.c.y, e.quad ? 1 : 0, 0);
           edgeMaxX[i] = Math.max(e.a.x, e.b.x, e.c.x);
         });
-        // Bin edges into horizontal bands over the (padded) screen bbox.
+        // Bin edges into horizontal bands over the (padded) screen bbox. A
+        // distance-field stroke reaches `strokeHalf` beyond each edge, so its
+        // edges must land in every band within that reach (bounds already
+        // include it).
+        const ePad = cmd.strokeHalf ? cmd.strokeHalf + pad : pad;
         const minY = cmd.bounds.minY - pad;
         const maxY = cmd.bounds.maxY + pad;
         const bandCount = Math.max(1, Math.ceil((maxY - minY) / bandHeight));
         const buckets: number[][] = Array.from({ length: bandCount }, () => []);
         cmd.edges.forEach((e, i) => {
-          const ey0 = Math.min(e.a.y, e.b.y, e.c.y) - pad;
-          const ey1 = Math.max(e.a.y, e.b.y, e.c.y) + pad;
+          const ey0 = Math.min(e.a.y, e.b.y, e.c.y) - ePad;
+          const ey1 = Math.max(e.a.y, e.b.y, e.c.y) + ePad;
           const b0 = Math.min(bandCount - 1, Math.max(0, Math.floor((ey0 - minY) / bandHeight)));
           const b1 = Math.min(bandCount - 1, Math.max(0, Math.floor((ey1 - minY) / bandHeight)));
           for (let b = b0; b <= b1; b++) {
@@ -1698,6 +1711,7 @@ export class WebGpuRenderer {
       f32[o + 13] = rec.bandMinY;
       f32[o + 14] = rec.bandH;
       f32[o + 15] = cmd.hardInterior ? 1 : 0;
+      f32[o + 36] = cmd.strokeHalf ?? 0; // stroke.x — distance-field half-width
       this.packPaint(cmd.paint, cmd.screenToLocal, f32, u32, o, stopData);
       draw++;
     }
@@ -2282,7 +2296,7 @@ export class WebGpuRenderer {
         layout: this.pathResources.layout,
         entries: [
           { binding: 0, resource: { buffer: this.edgeBuffer } },
-          { binding: 1, resource: { buffer: this.pathParamsBuffer, offset: index * 256, size: 144 } },
+          { binding: 1, resource: { buffer: this.pathParamsBuffer, offset: index * 256, size: 160 } },
           { binding: 2, resource: { buffer: this.bandTableBuffer } },
           { binding: 3, resource: { buffer: this.edgeIndexBuffer } },
           { binding: 4, resource: { buffer: this.gradStopsBuffer } },

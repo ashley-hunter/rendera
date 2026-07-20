@@ -177,5 +177,35 @@ across the actual turn, and none at all where the turn is shallower than one
 arc-segment (there the offset rectangles already meet within tolerance). That
 drops a stroked glyph to ~3k edges (now dominated by the segment rectangles) with
 no visible change — verified by a gap-free-circle readback and an edge-count
-guard. Offsetting the curves as curves (few edges, like the fill) is the deeper
-follow-up.
+guard.
+
+## Follow-up: distance-field round strokes
+
+Offsetting curves into an outline (whether flattened rectangles or fitted
+quadratics) is fundamentally fragile for thin strokes: a first attempt to offset
+as quadratics shipped visible blobs on display text, because at a thin width the
+offset pieces go bowtie / self-intersect and no per-piece winding fixes it. The
+robust answer avoids offset geometry entirely.
+
+A **round** stroke (round join, and round cap or a closed path — i.e. all text,
+and most decorative strokes) is exactly *"the region within half-width of the
+centerline"* — the Minkowski sum of the path with a disc. So instead of building
+an outline, the render list emits the resolved-outline **centerline** edges plus
+a half-width, and the path shader — which already computes the exact distance to
+its nearest line/quadratic edge for the fill's AA rim — paints coverage where
+that distance ≤ half, with the same ~1px analytic edge. Round joins and caps fall
+out for free (distance to the polyline rounds every corner and end). The edges
+are binned with the band pad widened to the half-width so a pixel finds every
+edge within reach.
+
+This is robust *by construction* — there is no offset geometry, so blobs,
+bowties, self-intersection, and faceting are all impossible — and exact at any
+zoom (distance to exact quadratics). It's also *cheaper*: the centerline is ~30
+edges vs the ~3k of an offset outline. Overlap resolution still runs first
+(distance to the raw centerline would re-stroke the interior seams). Verified by
+readbacks: a stroked glyph shows no interior seam and, at high zoom, *every*
+stroke pixel lies within half-width of the centerline (no blob can exist), and a
+stroked circle's band is continuous and smooth. Miter/bevel/square strokes still
+need real corner geometry, so they keep the flattened outline stroker (robust,
+with the arc-join edge reduction above); extending the distance field to those
+join/cap kinds is the remaining follow-up.

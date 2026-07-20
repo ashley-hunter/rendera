@@ -3,7 +3,9 @@ import {
   createCamera,
   createSequentialIdFactory,
   ellipsePath,
+  flattenPath,
   pointInPath,
+  resolveOverlaps,
   SceneDocument,
   type PathNode,
   type Path,
@@ -112,5 +114,62 @@ describe('stroked glyph renders no interior seam (end-to-end)', () => {
       if (p.r + p.g + p.b < 60) gaps++; // background (unlit) on the centreline
     }
     expect(gaps).toBe(0);
+  });
+
+  // The regression the user hit: a thin round stroke on a glyph at high zoom drew
+  // dark ink ACROSS the letter and stray blobs. With distance-field stroking the
+  // stroke is exactly "within half-width of the centerline", so EVERY stroke
+  // pixel must be near the glyph outline — no blob can exist anywhere.
+  it('keeps every stroke pixel within half-width of the centerline (no blobs)', async () => {
+    const doc = SceneDocument.create({ idFactory: createSequentialIdFactory('n') });
+    const width = 26; // thin relative to the ~1000-unit glyph, like display text
+    doc.insert<PathNode>({
+      type: 'path',
+      name: 'e',
+      path: ePath,
+      fill: { type: 'solid', color: { r: 0.3, g: 0.55, b: 1, a: 1 } },
+      stroke: { paint: { type: 'solid', color: { r: 0.05, g: 0.08, b: 0.17, a: 1 } }, width, join: 'round' },
+    });
+    const size = 340;
+    const zoom = 0.62;
+    const pan = { x: 10, y: 20 };
+    const renderer = await WebGpuRenderer.create(makeCanvas(size), { colorSpace: 'srgb', dither: false });
+    renderer.setClearColor({ r: 0, g: 0, b: 0, a: 1 });
+    renderer.setRenderList(buildRenderList(doc, createCamera({ zoom, pan })));
+    const rb = await renderer.readback();
+    renderer.destroy();
+
+    // Screen-space polyline of the stroked centerline (overlap-resolved outline).
+    const poly = flattenPath(resolveOverlaps(ePath), 1).map((line) =>
+      line.map((pt) => ({ x: pan.x + zoom * pt.x, y: pan.y + zoom * pt.y }))
+    );
+    const distToCenter = (x: number, y: number): number => {
+      let best = Infinity;
+      for (const line of poly)
+        for (let i = 0; i + 1 < line.length; i++) {
+          const a = line[i];
+          const b = line[i + 1];
+          const dx = b.x - a.x;
+          const dy = b.y - a.y;
+          const l2 = dx * dx + dy * dy || 1e-9;
+          const t = Math.max(0, Math.min(1, ((x - a.x) * dx + (y - a.y) * dy) / l2));
+          best = Math.min(best, Math.hypot(x - (a.x + t * dx), y - (a.y + t * dy)));
+        }
+      return best;
+    };
+    const half = (width / 2) * zoom;
+    let strokePixels = 0;
+    let blobs = 0;
+    for (let y = 0; y < size; y++) {
+      for (let x = 0; x < size; x++) {
+        const p = pixel(rb, x, y);
+        const lum = p.r + p.g + p.b;
+        if (lum < 20 || p.b > 130) continue; // background or blue fill
+        strokePixels++;
+        if (distToCenter(x, y) > half + 3) blobs++;
+      }
+    }
+    expect(strokePixels).toBeGreaterThan(200); // the stroke is actually drawn
+    expect(blobs).toBe(0); // and never strays off the outline
   });
 });
