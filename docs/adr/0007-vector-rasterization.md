@@ -205,7 +205,23 @@ edges vs the ~3k of an offset outline. Overlap resolution still runs first
 (distance to the raw centerline would re-stroke the interior seams). Verified by
 readbacks: a stroked glyph shows no interior seam and, at high zoom, *every*
 stroke pixel lies within half-width of the centerline (no blob can exist), and a
-stroked circle's band is continuous and smooth. Miter/bevel/square strokes still
-need real corner geometry, so they keep the flattened outline stroker (robust,
-with the arc-join edge reduction above); extending the distance field to those
-join/cap kinds is the remaining follow-up.
+stroked circle's band is continuous and smooth.
+
+**Miter/bevel via corner wedges.** A round join is a half-disc on a sharp
+corner, so round-stroking a serif face beads every serif tip and terminal — and
+a geometric miter stroker flattens, so it *spikes and facets* at deep zoom.
+Instead, miter/bevel reuse the distance-field round body (crisp, round corners)
+and *sharpen* each sharp corner with an exact wedge fill: `joinWedges` emits the
+miter apex quad (or bevel triangle) at every corner whose turn exceeds a small
+threshold, miter-limited so acute corners bevel instead of spiking. The wedges
+are exact triangles (no flattening), so corners stay crisp at any zoom, and only
+real corners cost a wedge (the round body covers smooth joins). Stroked serif
+text is now sharp *and* crisp at any zoom. Square/butt caps on *open* paths still
+use the flattened outline stroker (the field would round the ends); closed paths
+and round caps use the field.
+
+A subtlety this exposed: overlap resolution emits cubics, and converting a
+*straight* cubic to a quadratic gives a degenerate quad (`control` on the chord,
+so `A−2B+C ≈ 0`). `dQuad`'s Cardano solve divides by that and returns garbage —
+which showed as a stroked rect's horizontal edges rendering in broken chunks.
+`dQuad` now falls back to `dLine` when the quad is effectively straight.

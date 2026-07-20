@@ -10,7 +10,7 @@
  * resolution-independent AA, band-binning, and compositor for free.
  */
 
-import { flattenSubpaths, type Path, type SubPath } from './path';
+import { flattenSubpaths, toQuadraticPath, type Path, type SubPath } from './path';
 import { add, dot, negate, normalize, scale, subtract, vec2, type Vec2 } from './vec2';
 
 export type StrokeCap = 'butt' | 'round' | 'square';
@@ -198,5 +198,94 @@ export function strokePath(path: Path, style: StrokeStyle, tol = 0.25): Path {
     }
   }
 
+  return { subpaths: pieces.map(toSubPath) };
+}
+
+/**
+ * Miter/bevel join wedges at the sharp corners of `path`, as fill polygons.
+ *
+ * These SHARPEN a distance-field round stroke into a miter/bevel one. The round
+ * body already covers each corner's half-disc (a rounded corner); adding the
+ * outer wedge extends it out to the miter apex, so the corner becomes sharp.
+ * Because the wedges are exact triangles/quads (no flattening) the corners stay
+ * crisp at any zoom, and the miter limit turns very acute corners into bevels
+ * instead of runaway spikes. Smooth curve joins (tiny turns) are skipped — the
+ * round body already covers them seamlessly, and skipping keeps this to a
+ * handful of pieces per glyph.
+ */
+export function joinWedges(path: Path, style: StrokeStyle, tol = 0.25): Path {
+  const half = style.width / 2;
+  const join: StrokeJoin = style.join ?? 'miter';
+  if (half <= 0 || join === 'round') {
+    return { subpaths: [] };
+  }
+  const miterLimit = style.miterLimit ?? 4;
+  const pieces: Vec2[][] = [];
+  const emit = (poly: Vec2[]): void => {
+    if (poly.length >= 3) {
+      pieces.push(oriented(poly));
+    }
+  };
+  const wedge = (v: Vec2, d0: Vec2, d1: Vec2): void => {
+    const turn = Math.atan2(cross(d0, d1), dot(d0, d1));
+    if (Math.abs(turn) < 0.08) {
+      return; // a smooth join — the round body already covers it
+    }
+    const n0 = scale(perp(d0), half);
+    const n1 = scale(perp(d1), half);
+    // Both sides: the convex side is the real miter, the concave one sits inside
+    // the round body (harmless). Avoids needing the contour's orientation.
+    for (const s of [1, -1]) {
+      const o0 = add(v, scale(n0, s));
+      const o1 = add(v, scale(n1, s));
+      if (join === 'bevel') {
+        emit([v, o0, o1]);
+        continue;
+      }
+      const m = lineIntersect(o0, d0, o1, d1);
+      if (m && Math.hypot(m.x - v.x, m.y - v.y) / half <= miterLimit) {
+        emit([v, o0, m, o1]);
+      } else {
+        emit([v, o0, o1]); // past the miter limit — bevel
+      }
+    }
+  };
+
+  for (const sp of toQuadraticPath(path, tol).subpaths) {
+    type Seg = { end: Vec2; startDir: Vec2; endDir: Vec2 };
+    const segs: Seg[] = [];
+    let cur = sp.start;
+    for (const seg of sp.segments) {
+      if (seg.type === 'line') {
+        const d = subtract(seg.to, cur);
+        if (Math.hypot(d.x, d.y) > 1e-9) {
+          const n = normalize(d);
+          segs.push({ end: seg.to, startDir: n, endDir: n });
+        }
+        cur = seg.to;
+      } else if (seg.type === 'quad') {
+        segs.push({
+          end: seg.to,
+          startDir: normalize(subtract(seg.control, cur)),
+          endDir: normalize(subtract(seg.to, seg.control)),
+        });
+        cur = seg.to;
+      }
+    }
+    if (segs.length < 2) {
+      continue;
+    }
+    const closed = sp.closed || Math.hypot(cur.x - sp.start.x, cur.y - sp.start.y) <= 1e-6;
+    if (closed && Math.hypot(cur.x - sp.start.x, cur.y - sp.start.y) > 1e-9) {
+      const n = normalize(subtract(sp.start, cur));
+      segs.push({ end: sp.start, startDir: n, endDir: n });
+    }
+    for (let i = 0; i < segs.length - 1; i++) {
+      wedge(segs[i].end, segs[i].endDir, segs[i + 1].startDir);
+    }
+    if (closed) {
+      wedge(segs[segs.length - 1].end, segs[segs.length - 1].endDir, segs[0].startDir);
+    }
+  }
   return { subpaths: pieces.map(toSubPath) };
 }

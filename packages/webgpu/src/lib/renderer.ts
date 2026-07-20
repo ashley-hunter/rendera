@@ -566,6 +566,13 @@ fn dLine(p : vec2f, a : vec2f, b : vec2f) -> f32 {
 fn dQuad(pos : vec2f, A : vec2f, B : vec2f, C : vec2f) -> f32 {
   let a = B - A;
   let b = A - 2.0 * B + C;
+  // A (near-)straight quad has b ≈ 0 (control on the chord); the Cardano solve
+  // below then divides by ~0 and returns garbage. Such quads come from
+  // converting straight cubic edges — treat them as the line A→C.
+  let chord = C - A;
+  if (dot(b, b) < 1e-4 * max(dot(chord, chord), 1e-8)) {
+    return dLine(pos, A, C);
+  }
   let c = a * 2.0;
   let d = A - pos;
   let kk = 1.0 / max(dot(b, b), 1e-8);

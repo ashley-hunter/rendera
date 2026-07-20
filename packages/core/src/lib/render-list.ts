@@ -33,7 +33,7 @@ import {
   type PathEdge,
   type SubPath,
 } from './path';
-import { strokePath } from './stroke';
+import { joinWedges, strokePath } from './stroke';
 import { vec2 } from './vec2';
 
 /** A linear-light RGBA colour, components in [0, 1]. */
@@ -264,10 +264,12 @@ interface PreparedGeom {
 interface GeomEntry {
   sig: string;
   fill: readonly PreparedGeom[];
-  /** Geometric stroke outline (offset polygons), for non-round joins/caps. */
+  /** Geometric stroke outline (offset polygons), for open butt/square-capped. */
   stroke: readonly PreparedGeom[];
-  /** Resolved stroke *centerline* clusters, for distance-field round strokes. */
+  /** Resolved stroke *centerline* clusters, for the distance-field stroke body. */
   centerline: readonly PreparedGeom[];
+  /** Miter/bevel corner wedges (fill), sharpening the distance-field body. */
+  wedges: readonly PreparedGeom[];
 }
 
 /** Whether every subpath is closed (so a stroke has no caps — round-join
@@ -533,6 +535,7 @@ export function buildRenderList(
 
     let strokeGeom: PreparedGeom[] = [];
     let centerline: PreparedGeom[] = [];
+    let wedges: PreparedGeom[] = [];
     if (stroke) {
       // Stroke the shape's *resolved* outline, not the raw contours. Fonts (and
       // hand-drawn art) routinely self-overlap — a glyph's crossbar running back
@@ -540,23 +543,24 @@ export function buildRenderList(
       // stroking would ink as spurious seams deep inside the shape. Removing the
       // overlaps first leaves only the visible edge to stroke.
       const strokeSource = resolveOverlaps(localPath);
-      const round = (stroke.join ?? 'miter') === 'round' && ((stroke.cap ?? 'butt') === 'round' || allClosed(localPath));
-      if (round) {
-        // Round strokes render as a distance field over the centerline — exact
-        // and resolution-independent, no offset geometry (so nothing to facet or
-        // self-intersect). Just the resolved outline's own edges.
+      const style = { width: stroke.width, cap: stroke.cap, join: stroke.join, miterLimit: stroke.miterLimit };
+      // The distance field renders round joins and round/absent caps exactly.
+      // Use it whenever there are no square/butt caps to honour (closed paths, or
+      // a round cap) — it's resolution-independent, no offset geometry to facet.
+      const dfBody = allClosed(localPath) || (stroke.cap ?? 'butt') === 'round';
+      if (dfBody) {
         centerline = prepareClusters(toQuadraticPath(strokeSource, tol));
+        // Miter/bevel: sharpen the round body's corners with exact wedge fills.
+        if ((stroke.join ?? 'miter') !== 'round') {
+          wedges = prepareClusters(joinWedges(strokeSource, style, tol));
+        }
       } else {
-        // Miter/bevel/square need real corner geometry: build the offset outline.
-        const outline = strokePath(
-          strokeSource,
-          { width: stroke.width, cap: stroke.cap, join: stroke.join, miterLimit: stroke.miterLimit },
-          tol
-        );
-        strokeGeom = prepareClusters(outline);
+        // Open path with a butt/square cap: fall back to the geometric outline,
+        // which builds those caps (the distance field would round them).
+        strokeGeom = prepareClusters(strokePath(strokeSource, style, tol));
       }
     }
-    const entry: GeomEntry = { sig, fill, stroke: strokeGeom, centerline };
+    const entry: GeomEntry = { sig, fill, stroke: strokeGeom, centerline, wedges };
     geomCache.set(id, entry);
     return entry;
   };
@@ -638,6 +642,22 @@ export function buildRenderList(
             strokeHalf,
           });
         }
+      }
+      // Miter/bevel corner wedges: plain fills that sharpen the round body's
+      // corners into sharp joins (exact triangles, crisp at any zoom).
+      for (const c of geom.wedges) {
+        commands.push({
+          op: 'draw-path',
+          nodeId: id,
+          paint: stroke.paint,
+          screenToLocal,
+          fillRule: 'nonzero',
+          opacity,
+          blend,
+          edges: transformEdges(c.edges, screenMat),
+          bounds: transformBoundsAabb(c.bounds, screenMat),
+          hardInterior: true,
+        });
       }
     }
   };
