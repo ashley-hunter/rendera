@@ -452,14 +452,35 @@ fn windLine(p : vec2f, a : vec2f, c : vec2f) -> i32 {
   return 0;
 }
 
-fn crossQuad(p : vec2f, A : vec2f, B : vec2f, C : vec2f, a2 : f32, b1 : f32, t : f32) -> i32 {
-  if (t < 0.0 || t > 1.0) { return 0; }
+// x on the quad at the (unique) parameter in [tlo,thi] where y(t) == p.y. The
+// sub-range is monotonic in y, so exactly one root lies inside it.
+fn quadCrossX(A : vec2f, B : vec2f, C : vec2f, a2 : f32, b1 : f32, c0 : f32, tlo : f32, thi : f32) -> f32 {
+  var t = 0.0;
+  if (abs(a2) < 1e-6) {
+    t = -c0 / b1;
+  } else {
+    let s = sqrt(max(b1 * b1 - 4.0 * a2 * c0, 0.0));
+    let r0 = (-b1 - s) / (2.0 * a2);
+    let r1 = (-b1 + s) / (2.0 * a2);
+    t = r0;
+    if (r0 < tlo - 1e-4 || r0 > thi + 1e-4) { t = r1; }
+  }
+  t = clamp(t, tlo, thi);
   let u = 1.0 - t;
-  let x = u * u * A.x + 2.0 * u * t * B.x + t * t * C.x;
-  if (x <= p.x) { return 0; }
-  let dy = 2.0 * a2 * t + b1;
-  if (dy > 0.0) { return 1; }
-  if (dy < 0.0) { return -1; }
+  return u * u * A.x + 2.0 * u * t * B.x + t * t * C.x;
+}
+
+// One monotonic sub-edge: same half-open scanline rule as windLine (lower-y
+// endpoint inclusive, upper exclusive), tested on the sub-edge's exact endpoint
+// y-values so a vertex shared with the neighbouring segment counts exactly once.
+fn windSub(p : vec2f, x : f32, ya : f32, yb : f32) -> i32 {
+  let up = ya <= p.y && yb > p.y;
+  let down = yb <= p.y && ya > p.y;
+  if (!up && !down) { return 0; }
+  if (x > p.x) {
+    if (up) { return 1; }
+    return -1;
+  }
   return 0;
 }
 
@@ -467,17 +488,19 @@ fn windQuad(p : vec2f, A : vec2f, B : vec2f, C : vec2f) -> i32 {
   let a2 = A.y - 2.0 * B.y + C.y;
   let b1 = 2.0 * (B.y - A.y);
   let c0 = A.y - p.y;
-  var w = 0;
-  if (abs(a2) < 1e-6) {
-    if (abs(b1) > 1e-9) { w = w + crossQuad(p, A, B, C, a2, b1, -c0 / b1); }
-    return w;
+  // Split at the y-extremum into monotonic pieces, then count each like a line.
+  if (abs(a2) > 1e-6) {
+    let tex = -b1 / (2.0 * a2);
+    if (tex > 0.0 && tex < 1.0) {
+      let uex = 1.0 - tex;
+      let yex = uex * uex * A.y + 2.0 * uex * tex * B.y + tex * tex * C.y;
+      var w = 0;
+      w = w + windSub(p, quadCrossX(A, B, C, a2, b1, c0, 0.0, tex), A.y, yex);
+      w = w + windSub(p, quadCrossX(A, B, C, a2, b1, c0, tex, 1.0), yex, C.y);
+      return w;
+    }
   }
-  let disc = b1 * b1 - 4.0 * a2 * c0;
-  if (disc < 0.0) { return 0; }
-  let s = sqrt(disc);
-  w = w + crossQuad(p, A, B, C, a2, b1, (-b1 - s) / (2.0 * a2));
-  w = w + crossQuad(p, A, B, C, a2, b1, (-b1 + s) / (2.0 * a2));
-  return w;
+  return windSub(p, quadCrossX(A, B, C, a2, b1, c0, 0.0, 1.0), A.y, C.y);
 }
 
 // --- gradient evaluation (linear-light; OKLab optional) ---

@@ -542,6 +542,63 @@ describe('WebGpuRenderer colour pipeline', () => {
     expect(pixel(rb, 32, 32).r).toBeLessThan(20);
   });
 
+  it('counts a scanline through a shared quad vertex exactly once (no pan line)', async () => {
+    // Regression: a horizontal scanline landing EXACTLY on a curve's on-curve
+    // vertex must not double-count that crossing. The blob's left corner (20,20.5)
+    // is a shared endpoint of two quads, monotonic in y through it (not an
+    // extremum); at supersample 1 the fragment centre on row 20 is y=20.5, the
+    // exact coincidence. An inclusive-endpoint winding count tallies it twice and
+    // flips the interior-left to "inside" — the thin full-width line that used to
+    // flicker through zoomed text while panning. The far-left square only widens
+    // the draw quad so a stray fill on row 20 is observable.
+    const doc = SceneDocument.create({ idFactory: createSequentialIdFactory('n') });
+    doc.insert<PathNode>({
+      type: 'path',
+      name: 'blob',
+      path: {
+        subpaths: [
+          {
+            closed: true,
+            start: vec2(20, 20.5),
+            segments: [
+              { type: 'quad', control: vec2(20, 5.5), to: vec2(50, 5.5) },
+              { type: 'quad', control: vec2(80, 20.5), to: vec2(50, 35.5) },
+              { type: 'quad', control: vec2(20, 35.5), to: vec2(20, 20.5) },
+            ],
+          },
+          {
+            closed: true,
+            start: vec2(2, 40),
+            segments: [
+              { type: 'line', to: vec2(8, 40) },
+              { type: 'line', to: vec2(8, 50) },
+              { type: 'line', to: vec2(2, 50) },
+            ],
+          },
+        ],
+      },
+      fill: { type: 'solid', color: { r: 1, g: 1, b: 1, a: 1 } },
+    });
+    // supersample 1 so the scene sample on row 20 is exactly y=20.5.
+    const renderer = await WebGpuRenderer.create(makeCanvas(96), {
+      colorSpace: 'srgb',
+      dither: false,
+      supersample: 1,
+    });
+    renderer.setClearColor({ r: 0, g: 0, b: 0, a: 1 });
+    renderer.setRenderList(buildRenderList(doc, createCamera()));
+    const rb = await renderer.readback();
+
+    // The shape actually rendered (blob interior + the widening square).
+    expect(pixel(rb, 40, 20).r).toBeGreaterThan(200);
+    expect(pixel(rb, 5, 45).r).toBeGreaterThan(200);
+    // Row 20, between the square (x<=8) and the blob corner (x=20): background.
+    for (let x = 11; x <= 17; x++) {
+      expect(Math.max(pixel(rb, x, 20).r, pixel(rb, x, 20).g, pixel(rb, x, 20).b)).toBeLessThan(20);
+    }
+    renderer.destroy();
+  });
+
   it('paints a linear gradient across a path (red -> blue, band-free)', async () => {
     const doc = SceneDocument.create({ idFactory: createSequentialIdFactory('n') });
     doc.insert<PathNode>({

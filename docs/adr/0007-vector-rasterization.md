@@ -103,3 +103,25 @@ The tagged `Fill` (now `Paint`) extends beyond `solid` to `linear`, `radial`
 - **Fill and stroke share it.** A stroke's paint is a `Paint` too, so a single
   path can carry a gradient fill and an independent gradient stroke; both flow
   through the same analytic draw-path command.
+
+## Follow-up: robust half-open winding
+
+The per-pixel ray-crossing winding count must treat a scanline that lands
+*exactly* on a shared on-curve vertex as **one** crossing, not two. Straight
+edges (`windLine`) already use the standard half-open rule (lower-y endpoint
+inclusive, upper-y exclusive), but the quadratic count originally included
+*both* parameter endpoints (`t` in a closed `[0,1]`). When a device scanline
+coincided with a vertex two adjacent segments share — common along a line of
+text, where every glyph repeats the same x-height / baseline y — that crossing
+was tallied twice, flipping the winding for the rest of the row and painting a
+thin full-width line through the fill. It surfaced only at exact sub-pixel
+coincidences, so it flickered in and out while panning.
+
+The fix makes the quadratic use the **same** half-open convention as the line:
+`windQuad` splits the curve at its y-extremum into monotonic pieces and counts
+each piece against its *exact* endpoint y-values (`A.y`, the extremum, `C.y`) —
+the shared endpoints are bit-identical to the neighbouring segment's, so the
+`[lower, upper)` rule counts a shared vertex exactly once regardless of
+floating-point root error. Horizontal tangents self-cancel (a scanline grazing
+an extremum nets zero). Verified by a deterministic regression test: a shared
+quad vertex placed exactly on a scene scanline no longer leaks fill past it.
