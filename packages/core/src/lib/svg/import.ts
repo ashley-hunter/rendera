@@ -22,7 +22,7 @@ import type { Bounds } from '../bounds';
 import type { SceneDocument } from '../document';
 import type { NodeId } from '../id';
 import { transformPoint, type Mat2D } from '../matrix';
-import type { GroupNode, PathNode, Stroke, TextNode } from '../node';
+import type { ClipPath, GroupNode, MaskNode, MaskRef, PathNode, Stroke, TextNode } from '../node';
 import type { Gradient, Paint } from '../paint';
 import {
   ellipsePath,
@@ -236,8 +236,57 @@ interface Walker {
   doc: SceneDocument;
   gradients: GradientRegistry;
   byId: Map<string, XmlElement>;
+  clips: Map<string, ClipPath>;
+  masks: Map<string, NodeId>;
   fontFor: FontResolver;
   fonts: Set<string>;
+}
+
+/** Extract a `url(#id)` or `#id` reference target, or null. */
+function refId(value: string | undefined): string | null {
+  if (!value) return null;
+  const m = /url\(\s*#([^)\s]+)\s*\)/.exec(value);
+  if (m) return m[1];
+  return value[0] === '#' ? value.slice(1) : null;
+}
+
+/** Resolve an element's `clip-path` / `mask` (presentation attr or inline). */
+function clipMaskProps(w: Walker, el: XmlElement): { clip?: ClipPath; mask?: MaskRef } {
+  const inline = parseInlineStyle(el.attrs['style']);
+  const out: { clip?: ClipPath; mask?: MaskRef } = {};
+  const clipRef = refId(inline['clip-path'] ?? el.attrs['clip-path']);
+  if (clipRef) {
+    const clip = w.clips.get(clipRef);
+    if (clip) out.clip = clip;
+  }
+  const maskRef = refId(inline['mask'] ?? el.attrs['mask']);
+  if (maskRef) {
+    const maskId = w.masks.get(maskRef);
+    if (maskId) out.mask = { maskId };
+  }
+  return out;
+}
+
+/** Build the clip-path registry: each `<clipPath>` → one combined region. */
+function buildClips(root: XmlElement): Map<string, ClipPath> {
+  const clips = new Map<string, ClipPath>();
+  const walkEl = (el: XmlElement): void => {
+    if (el.tag === 'clipPath' && el.attrs['id']) {
+      const subpaths = [];
+      let rule: FillRule = 'nonzero';
+      for (const child of el.children) {
+        const p = shapePath(child);
+        if (p) subpaths.push(...p.subpaths);
+        if ((parseInlineStyle(child.attrs['style'])['clip-rule'] ?? child.attrs['clip-rule']) === 'evenodd') {
+          rule = 'evenodd';
+        }
+      }
+      if (subpaths.length > 0) clips.set(el.attrs['id'], { path: { subpaths }, rule });
+    }
+    el.children.forEach(walkEl);
+  };
+  walkEl(root);
+  return clips;
 }
 
 function strokeFrom(ctx: StyleCtx, style: StyleCtx, gradients: GradientRegistry, bbox: Bounds | null): Stroke | undefined {
@@ -266,6 +315,7 @@ function emitShape(w: Walker, el: XmlElement, style: StyleCtx, parentId: NodeId)
       stroke,
       transform: nodeTransform(el),
       opacity: elementOpacity(el),
+      ...clipMaskProps(w, el),
     },
     { parentId }
   );
@@ -293,6 +343,7 @@ function emitText(w: Walker, el: XmlElement, style: StyleCtx, parentId: NodeId):
       align: anchorToAlign(style.textAnchor),
       transform: createTransform({ translation }),
       opacity: elementOpacity(el),
+      ...clipMaskProps(w, el),
     },
     { parentId }
   );
@@ -320,7 +371,13 @@ function walk(w: Walker, el: XmlElement, parentStyle: StyleCtx, parentId: NodeId
 
   if (el.tag === 'g' || el.tag === 'a' || el.tag === 'svg') {
     const group = w.doc.insert<GroupNode>(
-      { type: 'group', name: el.attrs['id'] || el.tag, transform: nodeTransform(el), opacity: elementOpacity(el) },
+      {
+        type: 'group',
+        name: el.attrs['id'] || el.tag,
+        transform: nodeTransform(el),
+        opacity: elementOpacity(el),
+        ...clipMaskProps(w, el),
+      },
       { parentId }
     );
     for (const child of el.children) walk(w, child, style, group.id);
@@ -415,6 +472,8 @@ export function importSvg(doc: SceneDocument, source: string, options: SvgImport
     doc,
     gradients,
     byId,
+    clips: buildClips(root),
+    masks: new Map(),
     fontFor: options.fontFor ?? ((family) => family ?? 'default'),
     fonts: new Set(),
   };
@@ -426,6 +485,24 @@ export function importSvg(doc: SceneDocument, source: string, options: SvgImport
     transform: matrixToTransform(vp.matrix),
   });
   const rootStyle = resolveStyle(root, ROOT_STYLE(currentColor));
+
+  // Materialize <mask> elements as mask nodes (skipped in normal rendering) so
+  // `mask="url(#id)"` references resolve; their content imports like any subtree.
+  const maskEls: XmlElement[] = [];
+  const findMasks = (el: XmlElement): void => {
+    if (el.tag === 'mask' && el.attrs['id']) maskEls.push(el);
+    el.children.forEach(findMasks);
+  };
+  findMasks(root);
+  for (const mel of maskEls) {
+    const maskNode = doc.insert<MaskNode>(
+      { type: 'mask', name: mel.attrs['id'] || 'mask' },
+      { parentId: rootGroup.id }
+    );
+    w.masks.set(mel.attrs['id'], maskNode.id);
+    for (const child of mel.children) walk(w, child, rootStyle, maskNode.id);
+  }
+
   for (const child of root.children) walk(w, child, rootStyle, rootGroup.id);
 
   return { rootId: rootGroup.id, width: vp.width, height: vp.height, fonts: [...w.fonts] };

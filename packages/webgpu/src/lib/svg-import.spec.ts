@@ -78,6 +78,26 @@ describe('SVG import → analytic render (end to end)', () => {
     expect(right.b).toBeGreaterThan(right.r);
   });
 
+  it('clips an imported rect to a circular clip-path', async () => {
+    const rb = await renderSvg(
+      '<svg width="64" height="64">' +
+        '<defs><clipPath id="c"><circle cx="32" cy="32" r="16"/></clipPath></defs>' +
+        '<rect width="64" height="64" fill="#ffffff" clip-path="url(#c)"/></svg>'
+    );
+    expect(pixel(rb, 32, 32).r).toBeGreaterThan(230); // inside the clip circle
+    expect(Math.max(pixel(rb, 4, 4).r, pixel(rb, 4, 4).g, pixel(rb, 4, 4).b)).toBeLessThan(20); // corner clipped
+  });
+
+  it('soft-masks an imported rect with a luminance <mask>', async () => {
+    const rb = await renderSvg(
+      '<svg width="64" height="64">' +
+        '<defs><mask id="m"><rect x="0" y="0" width="32" height="64" fill="#ffffff"/></mask></defs>' +
+        '<rect width="64" height="64" fill="#ffffff" mask="url(#m)"/></svg>'
+    );
+    expect(pixel(rb, 12, 32).r).toBeGreaterThan(230); // revealed by white mask
+    expect(Math.max(pixel(rb, 52, 32).r, pixel(rb, 52, 32).g, pixel(rb, 52, 32).b)).toBeLessThan(20); // masked out
+  });
+
   it('honours evenodd fill-rule from the presentation attribute (square with hole)', async () => {
     const rb = await renderSvg(
       '<svg width="64" height="64">' +

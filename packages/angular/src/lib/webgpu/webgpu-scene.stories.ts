@@ -1,6 +1,7 @@
 import type { Meta, StoryObj } from '@storybook/angular';
 import { createBlendScene } from './blend-scene';
 import { createBooleanScene } from './boolean-scene';
+import { createClipMaskScene } from './clip-mask-scene';
 import { createGradientScene } from './gradient-scene';
 import { createImageSceneSource } from './image-scene';
 import { createSvgScene } from './svg-scene';
@@ -90,4 +91,17 @@ export const Booleans: Story = {
  */
 export const SvgImport: Story = {
   args: { scene: createSvgScene() },
+};
+
+/**
+ * Clipping & masks (ADR 0011). Four cells: a gradient CLIPPED to a star
+ * (geometric, antialiased); a gradient softened by a radial LUMINANCE mask (a
+ * vignette fading to transparent); a gradient revealed through an ALPHA mask
+ * (diagonal bars); and a group of overflowing circles CLIPPED to a rounded
+ * rectangle. Clip and mask share one offscreen-coverage mechanism — a clip is
+ * just an alpha mask of the filled clip path — and everything stays razor-sharp
+ * and re-editable at any zoom.
+ */
+export const ClipAndMask: Story = {
+  args: { scene: createClipMaskScene() },
 };

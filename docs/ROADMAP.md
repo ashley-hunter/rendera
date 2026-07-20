@@ -151,7 +151,13 @@ so backend tests do **pixel readback** to assert colour correctness.
   transforms, `viewBox` mapping, solid + gradient paints resolved in local space,
   and text — lowered to the same analytic vector nodes, so imported art stays
   resolution-independent and editable. Styled by presentation attributes + inline
-  `style=`. *(Full CSS cascade, filters, patterns, clip/mask are follow-ups.)*
+  `style=`, including `clip-path`/`mask`. *(Full CSS cascade, filters, patterns
+  are follow-ups.)*
+- ✅ **Clipping & masks (ADR 0011):** `clip?` (a vector region) and `mask?` (a
+  referenced `mask` node, luminance or alpha) on any spatial node — one offscreen
+  coverage-multiply shared by both (a clip is an alpha mask of the filled clip
+  path), composing by intersection. Soft/gradient/image masks, geometric clips,
+  and SVG `<clipPath>`/`<mask>`. *(Per-unit remapping + filter masks to come.)*
 
 ## Phase 6 — Effects & non-destructive stack  ⬜  → `@rendera/effects`
 

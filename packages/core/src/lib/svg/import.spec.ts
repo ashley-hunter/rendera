@@ -108,6 +108,34 @@ describe('importSvg', () => {
     expect(text.align).toBe('center');
   });
 
+  it('wires a clip-path reference onto the node as a clip region', () => {
+    const d = doc();
+    const r = importSvg(
+      d,
+      '<svg><defs><clipPath id="c"><rect x="0" y="0" width="20" height="20"/></clipPath></defs>' +
+        '<rect width="100" height="100" fill="red" clip-path="url(#c)"/></svg>'
+    );
+    const rect = d.getChildren(r.rootId).find((n) => n.type === 'path') as PathNode;
+    expect(rect.clip).toBeDefined();
+    expect(rect.clip?.path.subpaths.length).toBe(1);
+  });
+
+  it('materializes a <mask> as a mask node and references it', () => {
+    const d = doc();
+    const r = importSvg(
+      d,
+      '<svg><defs><mask id="m"><rect width="100" height="100" fill="white"/></mask></defs>' +
+        '<circle cx="50" cy="50" r="40" fill="blue" mask="url(#m)"/></svg>'
+    );
+    const kids = d.getChildren(r.rootId);
+    const maskNode = kids.find((n) => n.type === 'mask');
+    expect(maskNode).toBeDefined();
+    // The mask's content was imported as its child.
+    expect(d.getChildren(maskNode!.id).length).toBeGreaterThan(0);
+    const circle = kids.find((n) => n.type === 'path') as PathNode;
+    expect(circle.mask?.maskId).toBe(maskNode!.id);
+  });
+
   it('throws on a non-svg root', () => {
     expect(() => importSvg(doc(), '<html></html>')).toThrow();
   });
