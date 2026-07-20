@@ -204,6 +204,10 @@ Unblocked by the model (ADR 0004/0006); built last.
 - **Performance:** tiling, dirty-rect, viewport culling, OffscreenCanvas + worker
   rendering, GPU-memory budgets, WebGPU render bundles. Maintain a real mobile
   **device matrix** (Adreno / Mali / Apple) — GPU/driver variance is a known risk.
+  - ✅ Analytic-fill accelerator: Y row-band binning + max-X-sorted directional
+    edge culling (skip edges left of the pixel; ~1.9× on dense wide scenes, ADR
+    0007). Next: a per-tile winding backdrop (piet-gpu coarse raster) to bound the
+    left-edge worst case; blur strided sampling (ADR 0012) bounds blur at zoom.
 - **Deferred kernel performance** (correctness-neutral, API-transparent — do
   together, benchmark-driven, alongside the render loop and culling/selection):
   a children/parent index (today `getChildren` scans the whole node map), a

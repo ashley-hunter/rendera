@@ -125,3 +125,23 @@ the shared endpoints are bit-identical to the neighbouring segment's, so the
 floating-point root error. Horizontal tangents self-cancel (a scanline grazing
 an extremum nets zero). Verified by a deterministic regression test: a shared
 quad vertex placed exactly on a scene scanline no longer leaks fill past it.
+
+## Follow-up: binned accelerator + directional edge culling
+
+Per-pixel cost is O(edges in the pixel's row). The fill already bins edges into
+**horizontal row bands** (8 device px), so a fragment only tests its own band —
+and crucially the bins are by **Y, not X**: the winding is a horizontal
+ray-crossing count, so a pixel genuinely needs *every* edge to its right in the
+row (a naïve X-tiling would drop far-right edges and corrupt the winding).
+
+The remaining waste is edges to the *left* of the pixel — they can neither cross
+its rightward ray nor reach its ~1px AA rim, yet were still tested. So each
+band's edges are now **sorted by max-X descending**, and the shader **breaks**
+the loop at the first edge lying entirely left of the pixel (every later edge
+does too). This culls the left-of-pixel edges per fragment with zero extra
+storage and byte-identical output — ~1.9× on a dense wide scene (hundreds of
+edges per band), and more the further right the pixel sits. The worst case (the
+left edge of very wide content) is inherent to ray-crossing winding; a per-tile
+*winding backdrop* for edges that fully span a tile — the piet-gpu coarse-raster
+approach — is the next step to bound it, and is deferred as a heavier, winding-
+correctness-sensitive change.

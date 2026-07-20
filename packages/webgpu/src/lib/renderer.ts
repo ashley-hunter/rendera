@@ -790,6 +790,10 @@ fn paintColor(p : vec2f) -> vec4f {
     // boundary, so skip it for edges whose bbox is far from this pixel.
     let lo = min(min(e.a, e.b), e.c) - vec2f(2.0);
     let hi = max(max(e.a, e.b), e.c) + vec2f(2.0);
+    // Band edges are sorted by max-X descending: once one is entirely left of
+    // this pixel, so is every edge after it — none can cross the rightward ray
+    // or reach the rim, so stop.
+    if (hi.x < p.x) { break; }
     let near = p.x >= lo.x && p.x <= hi.x && p.y >= lo.y && p.y <= hi.y;
     if (e.kind.x > 0.5) {
       if (near) { dist = min(dist, dQuad(p, e.a, e.b, e.c)); }
@@ -1556,9 +1560,11 @@ export class WebGpuRenderer {
         if (cmd.blend !== 'normal') blendOps++;
       } else if (cmd.op === 'draw-path') {
         const edgeBase = edges.length / 8;
-        for (const e of cmd.edges) {
+        const edgeMaxX = new Float32Array(cmd.edges.length);
+        cmd.edges.forEach((e, i) => {
           edges.push(e.a.x, e.a.y, e.b.x, e.b.y, e.c.x, e.c.y, e.quad ? 1 : 0, 0);
-        }
+          edgeMaxX[i] = Math.max(e.a.x, e.b.x, e.c.x);
+        });
         // Bin edges into horizontal bands over the (padded) screen bbox.
         const minY = cmd.bounds.minY - pad;
         const maxY = cmd.bounds.maxY + pad;
@@ -1573,8 +1579,13 @@ export class WebGpuRenderer {
             buckets[b].push(edgeBase + i);
           }
         });
+        // Sort each band's edges by max-X descending so the fragment shader can
+        // stop as soon as it reaches edges entirely left of the pixel (they can
+        // neither cross its rightward winding ray nor touch its AA rim). Output
+        // is unchanged — only the wasted per-pixel edge tests are culled.
         const bandTableOffset = bandTable.length / 2;
         for (let b = 0; b < bandCount; b++) {
+          buckets[b].sort((ga, gb) => edgeMaxX[gb - edgeBase] - edgeMaxX[ga - edgeBase]);
           bandTable.push(edgeIndex.length, buckets[b].length);
           for (const gi of buckets[b]) {
             edgeIndex.push(gi);
