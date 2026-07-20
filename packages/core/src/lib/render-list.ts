@@ -21,7 +21,7 @@ import type { SceneDocument } from './document';
 import type { NodeId } from './id';
 import { booleanPath } from './boolean';
 import { compose, fromScaling, fromTranslation, invert, transformPoint, IDENTITY, type Mat2D } from './matrix';
-import type { BooleanNode, GroupNode, ImageNode, LayerNode, PathNode, SpatialNode, Stroke, TextNode } from './node';
+import type { BooleanNode, GroupNode, ImageNode, LayerNode, MaskType, PathNode, SpatialNode, Stroke, TextNode } from './node';
 import type { Paint } from './paint';
 import {
   pathBounds,
@@ -147,11 +147,34 @@ export interface PushGroupCommand {
   readonly nodeId: NodeId;
   readonly opacity: number;
   readonly blend: BlendMode;
+  /**
+   * If set, the most recent `pop-mask` target modulates this group's coverage
+   * (multiplied into its premultiplied RGBA) before it composites onto the
+   * backdrop — `type` selects the mask channel. A clip is emitted as an `alpha`
+   * mask whose content is the clip path filled opaque.
+   */
+  readonly mask?: { readonly type: MaskType };
 }
 
 /** End the current isolated group, compositing it onto the backdrop. */
 export interface PopGroupCommand {
   readonly op: 'pop-group';
+  readonly nodeId: NodeId;
+}
+
+/**
+ * Begin a mask source: the enclosed draws render into a dedicated coverage
+ * target instead of the current layer. The matching `pop-mask` stashes that
+ * target to be consumed by the next masked `push-group`.
+ */
+export interface PushMaskCommand {
+  readonly op: 'push-mask';
+  readonly nodeId: NodeId;
+}
+
+/** End a mask source, holding its target for the next masked `push-group`. */
+export interface PopMaskCommand {
+  readonly op: 'pop-mask';
   readonly nodeId: NodeId;
 }
 
@@ -162,7 +185,9 @@ export type RenderCommand =
   | DrawPathCommand
   | DrawMsdfCommand
   | PushGroupCommand
-  | PopGroupCommand;
+  | PopGroupCommand
+  | PushMaskCommand
+  | PopMaskCommand;
 
 /** The fill used for a layer that has none set (opaque mid-grey). */
 const DEFAULT_FILL: LinearRgba = { r: 0.5, g: 0.5, b: 0.5, a: 1 };
@@ -281,6 +306,9 @@ export function buildRenderList(
 ): RenderCommand[] {
   const commands: RenderCommand[] = [];
   const worldToScreen = worldToScreenMatrix(camera);
+  // The base screen matrix normally maps world→screen. While emitting a mask's
+  // content it is rebased so the mask renders in the masked node's local space.
+  let screenBase = worldToScreen;
 
   let boolCache = booleanResultCache.get(doc);
   if (!boolCache) {
@@ -447,125 +475,213 @@ export function buildRenderList(
     }
   };
 
-  const visit = (id: NodeId): void => {
+  /** Emit `content`, wrapped in the node's clip and/or mask coverage layers. */
+  function withLayers(
+    id: NodeId,
+    node: SpatialNode,
+    opacity: number,
+    blend: BlendMode,
+    content: (opacity: number, blend: BlendMode) => void
+  ): void {
+    const layers: { type: MaskType; emit: () => void }[] = [];
+
+    // Soft mask: render the mask node's content rebased into this node's local
+    // space (so a mask def is reusable and positioned relative to the target).
+    const maskRef = node.mask;
+    const maskNode = maskRef ? (doc.get(maskRef.maskId) as SpatialNode | undefined) : undefined;
+    if (maskRef && maskNode && maskNode.type === 'mask' && maskNode.visible !== false) {
+      const rebase = compose(
+        worldToScreen,
+        doc.getWorldMatrix(id),
+        invert(doc.getWorldMatrix(maskRef.maskId)) ?? IDENTITY
+      );
+      layers.push({
+        type: maskRef.type ?? 'luminance',
+        emit: () => {
+          const saved = screenBase;
+          screenBase = rebase;
+          for (const child of doc.getChildren(maskRef.maskId)) {
+            visit(child.id);
+          }
+          screenBase = saved;
+        },
+      });
+    }
+
+    // Geometric clip: the clip path filled opaque; its analytic-fill alpha is
+    // the clip coverage (applied as an alpha mask, intersecting any soft mask).
+    if (node.clip) {
+      const clip = node.clip;
+      const screenMat = compose(screenBase, doc.getWorldMatrix(id));
+      layers.push({
+        type: 'alpha',
+        emit: () =>
+          emitVector(id, clip.path, { type: 'solid', color: { r: 1, g: 1, b: 1, a: 1 } }, undefined, clip.rule ?? 'nonzero', screenMat, 1, 'normal'),
+      });
+    }
+
+    if (layers.length === 0) {
+      content(opacity, blend); // mask reference was invalid and there is no clip
+      return;
+    }
+    // Nest one isolated group per coverage layer; the OUTERMOST carries the
+    // node's opacity/blend so they apply to the final masked result.
+    layers.forEach((layer, i) => {
+      commands.push({ op: 'push-mask', nodeId: id });
+      layer.emit();
+      commands.push({ op: 'pop-mask', nodeId: id });
+      commands.push({
+        op: 'push-group',
+        nodeId: id,
+        opacity: i === 0 ? opacity : 1,
+        blend: i === 0 ? blend : 'normal',
+        mask: { type: layer.type },
+      });
+    });
+    content(1, 'normal');
+    for (let i = 0; i < layers.length; i++) {
+      commands.push({ op: 'pop-group', nodeId: id });
+    }
+  }
+
+  /** Emit an isolated group (or pass-through) around `emitChildren`. */
+  const emitGroup = (group: GroupNode, opacity: number, blend: BlendMode, emitChildren: () => void): void => {
+    const isolated = group.isolate === true || opacity < 1 || blend !== 'normal';
+    if (isolated) {
+      commands.push({ op: 'push-group', nodeId: group.id, opacity, blend });
+      emitChildren();
+      commands.push({ op: 'pop-group', nodeId: group.id });
+    } else {
+      emitChildren();
+    }
+  };
+
+  function visit(id: NodeId): void {
     const node = doc.get(id) as SpatialNode | undefined;
-    if (!node || node.visible === false) {
-      return; // missing, or a hidden node/subtree
+    if (!node || node.visible === false || node.type === 'mask') {
+      return; // missing, hidden, or a mask def (only drawn when referenced)
     }
     const opacity = node.opacity ?? 1;
     const blend: BlendMode = node.blendMode ?? 'normal';
+    const layered = !!node.clip || !!node.mask;
 
     if (node.type === 'group') {
       const group = node as GroupNode;
-      const isolated = group.isolate === true || opacity < 1 || blend !== 'normal';
-      if (isolated) {
-        commands.push({ op: 'push-group', nodeId: id, opacity, blend });
+      const emitChildren = (): void => {
         for (const child of doc.getChildren(id)) {
           visit(child.id);
         }
-        commands.push({ op: 'pop-group', nodeId: id });
+      };
+      if (layered) {
+        withLayers(id, node, opacity, blend, (op, bl) => emitGroup(group, op, bl, emitChildren));
       } else {
-        for (const child of doc.getChildren(id)) {
-          visit(child.id);
-        }
+        emitGroup(group, opacity, blend, emitChildren);
       }
       return;
     }
 
-    if (node.type === 'path') {
-      const path = node as PathNode;
-      const screenMat = compose(worldToScreen, doc.getWorldMatrix(id));
-      emitVector(id, path.path, path.fill, path.stroke, path.fillRule ?? 'nonzero', screenMat, opacity, blend);
-      return;
-    }
-
-    if (node.type === 'boolean') {
-      const bnode = node as BooleanNode;
-      // Fold the operands (in this node's local space) into one exact-curve path.
-      const local = resolveShape(id);
-      if (local && local.subpaths.length > 0) {
-        const screenMat = compose(worldToScreen, doc.getWorldMatrix(id));
-        emitVector(id, local, bnode.fill, bnode.stroke, bnode.fillRule ?? 'nonzero', screenMat, opacity, blend);
+    const emitSelf = (op: number, bl: BlendMode): void => {
+      if (node.type === 'path') {
+        const path = node as PathNode;
+        const screenMat = compose(screenBase, doc.getWorldMatrix(id));
+        emitVector(id, path.path, path.fill, path.stroke, path.fillRule ?? 'nonzero', screenMat, op, bl);
+        return;
       }
-      return;
-    }
 
-    if (node.type === 'text') {
-      const text = node as TextNode;
-      const screenMat = compose(worldToScreen, doc.getWorldMatrix(id));
-      const localPath = options.textPaths?.get(id);
-      const hasAnalytic = !!localPath && localPath.subpaths.length > 0;
-
-      // Route by on-screen size. MSDF is fast and flawless while the glyph is
-      // rendered at up to ~2x its atlas resolution; magnified beyond that its
-      // fixed-resolution field shows clash/hook artifacts, so fall back to the
-      // exact analytic outline (resolution-independent) when it's available.
-      const msdf = options.textMsdf?.get(id);
-      const det = screenMat.a * screenMat.d - screenMat.b * screenMat.c;
-      const screenScale = Math.sqrt(Math.abs(det)) || 1;
-      const zoomedPastMsdf = msdf ? msdf.fontSize * screenScale > msdf.atlasEmPx * 2 : false;
-
-      if (msdf && !(zoomedPastMsdf && hasAnalytic)) {
-        let color = DEFAULT_FILL;
-        if (text.fill) {
-          color = text.fill.type === 'solid' ? text.fill.color : text.fill.stops[0]?.color ?? DEFAULT_FILL;
-        }
-        const quads: MsdfQuad[] = [];
-        for (const g of msdf.glyphs) {
-          const left = g.originX + g.cell.plane.left * msdf.fontSize;
-          const right = g.originX + g.cell.plane.right * msdf.fontSize;
-          // plane bounds are em, Y-up; local space is Y-down (baseline at originY).
-          const top = g.originY - g.cell.plane.top * msdf.fontSize;
-          const bottom = g.originY - g.cell.plane.bottom * msdf.fontSize;
-          const localFromUnit = compose(
-            fromTranslation(vec2(left, top)),
-            fromScaling(vec2(right - left, bottom - top))
-          );
-          quads.push({
-            transform: compose(screenMat, localFromUnit),
-            uv: [
-              g.cell.x / msdf.atlasWidth,
-              g.cell.y / msdf.atlasHeight,
-              (g.cell.x + g.cell.w) / msdf.atlasWidth,
-              (g.cell.y + g.cell.h) / msdf.atlasHeight,
-            ],
-          });
-        }
-        if (quads.length > 0) {
-          commands.push({ op: 'draw-msdf', nodeId: id, color, opacity, blend, pxRange: msdf.pxRange, quads });
+      if (node.type === 'boolean') {
+        const bnode = node as BooleanNode;
+        // Fold the operands (in this node's local space) into one exact-curve path.
+        const local = resolveShape(id);
+        if (local && local.subpaths.length > 0) {
+          const screenMat = compose(screenBase, doc.getWorldMatrix(id));
+          emitVector(id, local, bnode.fill, bnode.stroke, bnode.fillRule ?? 'nonzero', screenMat, op, bl);
         }
         return;
       }
 
-      // Analytic outline path (used when magnified past MSDF, or as the only
-      // representation for large/stroked text). Shaping is async, so a node with
-      // no layout yet simply emits nothing.
-      if (localPath && localPath.subpaths.length > 0) {
-        emitVector(id, localPath, text.fill, text.stroke, text.fillRule ?? 'nonzero', screenMat, opacity, blend);
+      if (node.type === 'text') {
+        const text = node as TextNode;
+        const screenMat = compose(screenBase, doc.getWorldMatrix(id));
+        const localPath = options.textPaths?.get(id);
+        const hasAnalytic = !!localPath && localPath.subpaths.length > 0;
+
+        // Route by on-screen size. MSDF is fast and flawless while the glyph is
+        // rendered at up to ~2x its atlas resolution; magnified beyond that its
+        // fixed-resolution field shows clash/hook artifacts, so fall back to the
+        // exact analytic outline (resolution-independent) when it's available.
+        const msdf = options.textMsdf?.get(id);
+        const det = screenMat.a * screenMat.d - screenMat.b * screenMat.c;
+        const screenScale = Math.sqrt(Math.abs(det)) || 1;
+        const zoomedPastMsdf = msdf ? msdf.fontSize * screenScale > msdf.atlasEmPx * 2 : false;
+
+        if (msdf && !(zoomedPastMsdf && hasAnalytic)) {
+          let color = DEFAULT_FILL;
+          if (text.fill) {
+            color = text.fill.type === 'solid' ? text.fill.color : text.fill.stops[0]?.color ?? DEFAULT_FILL;
+          }
+          const quads: MsdfQuad[] = [];
+          for (const g of msdf.glyphs) {
+            const left = g.originX + g.cell.plane.left * msdf.fontSize;
+            const right = g.originX + g.cell.plane.right * msdf.fontSize;
+            // plane bounds are em, Y-up; local space is Y-down (baseline at originY).
+            const top = g.originY - g.cell.plane.top * msdf.fontSize;
+            const bottom = g.originY - g.cell.plane.bottom * msdf.fontSize;
+            const localFromUnit = compose(
+              fromTranslation(vec2(left, top)),
+              fromScaling(vec2(right - left, bottom - top))
+            );
+            quads.push({
+              transform: compose(screenMat, localFromUnit),
+              uv: [
+                g.cell.x / msdf.atlasWidth,
+                g.cell.y / msdf.atlasHeight,
+                (g.cell.x + g.cell.w) / msdf.atlasWidth,
+                (g.cell.y + g.cell.h) / msdf.atlasHeight,
+              ],
+            });
+          }
+          if (quads.length > 0) {
+            commands.push({ op: 'draw-msdf', nodeId: id, color, opacity: op, blend: bl, pxRange: msdf.pxRange, quads });
+          }
+          return;
+        }
+
+        // Analytic outline path (used when magnified past MSDF, or as the only
+        // representation for large/stroked text). Shaping is async, so a node with
+        // no layout yet simply emits nothing.
+        if (localPath && localPath.subpaths.length > 0) {
+          emitVector(id, localPath, text.fill, text.stroke, text.fillRule ?? 'nonzero', screenMat, op, bl);
+        }
+        return;
       }
-      return;
-    }
 
-    const local = doc.getLocalBounds(id);
-    if (!local) {
-      return;
-    }
-    // unit square -> local rect -> world -> screen.
-    const localFromUnit = compose(
-      fromTranslation(vec2(local.minX, local.minY)),
-      fromScaling(vec2(boundsWidth(local), boundsHeight(local)))
-    );
-    const transform = compose(worldToScreen, doc.getWorldMatrix(id), localFromUnit);
+      const local = doc.getLocalBounds(id);
+      if (!local) {
+        return;
+      }
+      // unit square -> local rect -> world -> screen.
+      const localFromUnit = compose(
+        fromTranslation(vec2(local.minX, local.minY)),
+        fromScaling(vec2(boundsWidth(local), boundsHeight(local)))
+      );
+      const transform = compose(screenBase, doc.getWorldMatrix(id), localFromUnit);
 
-    if (node.type === 'image') {
-      const image = node as ImageNode;
-      commands.push({ op: 'draw-image', nodeId: id, transform, assetId: image.assetId, opacity, blend });
+      if (node.type === 'image') {
+        const image = node as ImageNode;
+        commands.push({ op: 'draw-image', nodeId: id, transform, assetId: image.assetId, opacity: op, blend: bl });
+      } else {
+        const layer = node as LayerNode;
+        const color = layer.fill?.type === 'solid' ? layer.fill.color : DEFAULT_FILL;
+        commands.push({ op: 'draw-solid', nodeId: id, transform, color, opacity: op, blend: bl });
+      }
+    };
+
+    if (layered) {
+      withLayers(id, node, opacity, blend, emitSelf);
     } else {
-      const layer = node as LayerNode;
-      const color = layer.fill?.type === 'solid' ? layer.fill.color : DEFAULT_FILL;
-      commands.push({ op: 'draw-solid', nodeId: id, transform, color, opacity, blend });
+      emitSelf(opacity, blend);
     }
-  };
+  }
 
   for (const child of doc.getChildren(doc.root.id)) {
     visit(child.id);

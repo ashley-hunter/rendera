@@ -52,6 +52,31 @@ export interface Stroke {
 }
 
 /**
+ * A geometric clip: the node (and its subtree) renders only inside `path`, an
+ * antialiased vector region in the node's LOCAL space. Coverage is the path's
+ * analytic fill under `rule` — so a clip is exact and resolution-independent,
+ * and composes (intersects) with an outer clip/mask.
+ */
+export interface ClipPath {
+  readonly path: Path;
+  readonly rule?: FillRule;
+}
+
+/** What a soft mask's value is read from: content luminance (default) or alpha. */
+export type MaskType = 'luminance' | 'alpha';
+
+/**
+ * A soft mask reference: the node's alpha is modulated by the rendered content
+ * of the `mask` node (a `MaskNode`), reduced to a coverage value per pixel via
+ * `type`. The mask content is authored in the masked node's coordinate space.
+ */
+export interface MaskRef {
+  readonly maskId: NodeId;
+  /** Read the mask value from luminance (default) or alpha. */
+  readonly type?: MaskType;
+}
+
+/**
  * A node that participates in the transform hierarchy. Also carries the
  * universal compositing properties — every spatial node can be faded
  * (`opacity`), blended (`blendMode`), or hidden (`visible`); all default when
@@ -66,6 +91,10 @@ export interface SpatialNode extends SceneNode {
   blendMode?: BlendMode;
   /** Whether the node (and its subtree) is drawn (default `true`). */
   visible?: boolean;
+  /** Restrict rendering to a vector region (intersects any inherited clip). */
+  clip?: ClipPath;
+  /** Modulate the node's alpha by a mask node's luminance or alpha. */
+  mask?: MaskRef;
 }
 
 /** The single, non-spatial root of a document (the coordinate origin). */
@@ -183,6 +212,18 @@ export interface BooleanNode extends SpatialNode {
   stroke?: Stroke;
 }
 
+/**
+ * A mask source: a container whose children are rendered off-screen and reduced
+ * to a per-pixel coverage value (luminance or alpha) that modulates whatever
+ * node references it via `mask`. Not drawn on its own — it only produces a mask.
+ * Its content is any subtree (shapes, gradients, images), so masks can be soft
+ * (a gradient fade), hard (a shape), or photographic (an image).
+ */
+export interface MaskNode extends SpatialNode {
+  readonly type: 'mask';
+  name: string;
+}
+
 /** The built-in node types known to the default registry. */
 export type KnownNode =
   | DocumentNode
@@ -191,7 +232,8 @@ export type KnownNode =
   | ImageNode
   | PathNode
   | TextNode
-  | BooleanNode;
+  | BooleanNode
+  | MaskNode;
 
 /**
  * The fields a caller supplies when inserting a node. `id`/`parentId`/`index`

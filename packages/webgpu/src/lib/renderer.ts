@@ -74,6 +74,10 @@ interface StackEntry {
   tex: GPUTexture;
   opacity: number;
   mode: number;
+  /** If set, this coverage target modulates the layer at pop (clip/soft mask). */
+  maskTex?: GPUTexture;
+  /** Mask channel: 0 = luminance, 1 = alpha. */
+  maskChannel?: number;
 }
 
 export interface RendererColor {
@@ -349,6 +353,32 @@ fn blendColor(mode : i32, Cb : vec3f, Cs : vec3f) -> vec3f {
   let co = alphaS * (1.0 - alphaB) * Cs + alphaS * alphaB * B + alphaB * (1.0 - alphaS) * Cb;
   let ao = alphaS + alphaB * (1.0 - alphaS);
   return vec4f(co, ao);
+}
+`;
+
+// Clip/mask application: multiply a layer's premultiplied RGBA by a per-pixel
+// coverage read from a mask target. `channel` 0 = luminance (of the mask's
+// premultiplied linear RGB — already alpha-weighted, matching SVG's luminance
+// mask), 1 = alpha (used for geometric clips, whose mask is the clip path filled
+// opaque). Multiplying premultiplied colour by a scalar stays premultiplied.
+const MASK_SHADER = /* wgsl */ `
+@group(0) @binding(0) var layerTex : texture_2d<f32>;
+@group(0) @binding(1) var maskTex : texture_2d<f32>;
+struct MaskP { channel : f32, _p0 : f32, _p1 : f32, _p2 : f32 };
+@group(0) @binding(2) var<uniform> mp : MaskP;
+
+@vertex fn vs(@builtin(vertex_index) i : u32) -> @builtin(position) vec4f {
+  var p = array<vec2f, 3>(vec2f(-1.0, -1.0), vec2f(3.0, -1.0), vec2f(-1.0, 3.0));
+  return vec4f(p[i], 0.0, 1.0);
+}
+
+@fragment fn fs(@builtin(position) frag : vec4f) -> @location(0) vec4f {
+  let coord = vec2i(frag.xy);
+  let layer = textureLoad(layerTex, coord, 0);
+  let m = textureLoad(maskTex, coord, 0);
+  var coverage = m.a;
+  if (mp.channel < 0.5) { coverage = 0.2126 * m.r + 0.7152 * m.g + 0.0722 * m.b; }
+  return layer * coverage;
 }
 `;
 
@@ -742,6 +772,9 @@ export class WebGpuRenderer {
   /** Uniform slots (256B each) for per-op blend params. */
   private blendParamsBuffer: GPUBuffer;
   private blendParamsSlots = 0;
+  /** Uniform slots (256B each) for per-op clip/mask channel params. */
+  private maskParamsBuffer: GPUBuffer;
+  private maskParamsSlots = 0;
 
   /** Pool of layer-sized targets reused across frames. */
   private readonly targetPool: GPUTexture[] = [];
@@ -774,6 +807,7 @@ export class WebGpuRenderer {
     private readonly noiseTexture: GPUTexture,
     private readonly image: ImageResources,
     private readonly compositor: CompositorResources,
+    private readonly maskCompositor: CompositorResources,
     private readonly pathResources: PathResources,
     private readonly msdf: MsdfResources,
     width: number,
@@ -789,6 +823,11 @@ export class WebGpuRenderer {
       usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
     });
     this.blendParamsSlots = 1;
+    this.maskParamsBuffer = this.device.createBuffer({
+      size: 256,
+      usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+    });
+    this.maskParamsSlots = 1;
     this.pathParamsBuffer = this.device.createBuffer({
       size: 256,
       usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
@@ -1029,6 +1068,23 @@ export class WebGpuRenderer {
       layout: blendLayout,
     };
 
+    // --- clip/mask pipeline (layer x coverage -> layer target) ---
+    const maskModule = device.createShaderModule({ code: MASK_SHADER });
+    const maskLayout = device.createBindGroupLayout({
+      entries: [
+        { binding: 0, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'float' } },
+        { binding: 1, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'float' } },
+        { binding: 2, visibility: GPUShaderStage.FRAGMENT, buffer: { type: 'uniform' } },
+      ],
+    });
+    const maskPipeline = device.createRenderPipeline({
+      layout: device.createPipelineLayout({ bindGroupLayouts: [maskLayout] }),
+      vertex: { module: maskModule, entryPoint: 'vs' },
+      fragment: { module: maskModule, entryPoint: 'fs', targets: [{ format: SCENE_FORMAT }] },
+      primitive: { topology: 'triangle-list' },
+    });
+    const maskResources: CompositorResources = { pipeline: maskPipeline, layout: maskLayout };
+
     // --- vector-fill pipeline (analytic coverage -> layer target) ---
     const pathModule = device.createShaderModule({ code: PATH_SHADER });
     // The path shader reads the viewport in both stages (fragment needs the
@@ -1155,6 +1211,7 @@ export class WebGpuRenderer {
       noiseTexture,
       imageResources,
       compositorResources,
+      maskResources,
       pathResources,
       msdfResources,
       width,
@@ -1297,6 +1354,7 @@ export class WebGpuRenderer {
     const bandHeight = 8; // device px per horizontal band
     const pad = 2; // AA margin, matching the vertex bbox pad
     let blendOps = 0;
+    let maskOps = 0;
     for (const cmd of commands) {
       if (cmd.op === 'draw-solid') {
         const m = cmd.transform;
@@ -1357,6 +1415,7 @@ export class WebGpuRenderer {
         if (cmd.blend !== 'normal') blendOps++;
       } else if (cmd.op === 'push-group') {
         blendOps++; // the matching pop composites the group (one blend pass)
+        if (cmd.mask) maskOps++; // the pop also applies a clip/mask coverage pass
       }
     }
 
@@ -1390,6 +1449,7 @@ export class WebGpuRenderer {
       this.packPathParams(commands);
     }
     this.ensureBlendParams(blendOps);
+    this.ensureMaskParams(maskOps);
   }
 
   /**
@@ -1547,6 +1607,20 @@ export class WebGpuRenderer {
     this.blendParamsSlots = need;
   }
 
+  /** Ensure the mask-param uniform buffer has one 256B slot per clip/mask apply. */
+  private ensureMaskParams(slots: number): void {
+    const need = Math.max(1, slots);
+    if (need <= this.maskParamsSlots) {
+      return;
+    }
+    this.maskParamsBuffer.destroy();
+    this.maskParamsBuffer = this.device.createBuffer({
+      size: need * 256,
+      usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+    });
+    this.maskParamsSlots = need;
+  }
+
   resize(width: number, height: number): void {
     this.width = Math.max(1, Math.floor(width));
     this.height = Math.max(1, Math.floor(height));
@@ -1599,6 +1673,7 @@ export class WebGpuRenderer {
     this.unitQuadBuffer.destroy();
     this.noiseTexture.destroy();
     this.blendParamsBuffer.destroy();
+    this.maskParamsBuffer.destroy();
     this.pathParamsBuffer.destroy();
     this.edgeBuffer?.destroy();
     this.bandTableBuffer?.destroy();
@@ -1638,6 +1713,10 @@ export class WebGpuRenderer {
     let pathCursor = 0;
     let msdfCursor = 0;
     let blendSlot = 0;
+    let maskSlot = 0;
+    // Coverage targets captured by `pop-mask`, consumed by the next masked
+    // `push-group` (LIFO — a push-group always follows its pop-mask).
+    const pendingMasks: GPUTexture[] = [];
 
     // Consecutive Normal draws onto the same target share ONE render pass, so
     // the (large, supersampled) target is load+stored once per run rather than
@@ -1666,11 +1745,33 @@ export class WebGpuRenderer {
     for (const cmd of this.commands) {
       const top = stack[stack.length - 1];
 
+      if (cmd.op === 'push-mask') {
+        flush();
+        const target = this.acquireTarget();
+        this.clearTarget(encoder, target, { r: 0, g: 0, b: 0, a: 0 });
+        stack.push({ tex: target, opacity: 1, mode: 0 });
+        continue;
+      }
+      if (cmd.op === 'pop-mask') {
+        flush();
+        const maskEntry = stack.pop();
+        if (maskEntry) {
+          pendingMasks.push(maskEntry.tex); // consumed by the next masked push-group
+        }
+        continue;
+      }
       if (cmd.op === 'push-group') {
         flush();
         const target = this.acquireTarget();
         this.clearTarget(encoder, target, { r: 0, g: 0, b: 0, a: 0 });
-        stack.push({ tex: target, opacity: cmd.opacity, mode: blendModeIndex(cmd.blend) });
+        const maskTex = cmd.mask ? pendingMasks.pop() : undefined;
+        stack.push({
+          tex: target,
+          opacity: cmd.opacity,
+          mode: blendModeIndex(cmd.blend),
+          maskTex,
+          maskChannel: cmd.mask ? (cmd.mask.type === 'alpha' ? 1 : 0) : undefined,
+        });
         continue;
       }
       if (cmd.op === 'pop-group') {
@@ -1680,10 +1781,19 @@ export class WebGpuRenderer {
         if (!group || !parent) {
           continue;
         }
+        // Apply the clip/mask coverage to the group before it composites.
+        let layer = group.tex;
+        if (group.maskTex) {
+          const masked = this.acquireTarget();
+          this.maskApplyPass(encoder, masked, layer, group.maskTex, group.maskChannel ?? 0, maskSlot++);
+          this.releaseTarget(layer);
+          this.releaseTarget(group.maskTex);
+          layer = masked;
+        }
         const dest = this.acquireTarget();
-        this.blendPass(encoder, dest, parent.tex, group.tex, group.mode, group.opacity, blendSlot++);
+        this.blendPass(encoder, dest, parent.tex, layer, group.mode, group.opacity, blendSlot++);
         this.releaseTarget(parent.tex);
-        this.releaseTarget(group.tex);
+        this.releaseTarget(layer);
         stack[stack.length - 1] = { ...parent, tex: dest };
         continue;
       }
@@ -1816,6 +1926,34 @@ export class WebGpuRenderer {
       colorAttachments: [{ view: dest.createView(), loadOp: 'clear', storeOp: 'store', clearValue: { r: 0, g: 0, b: 0, a: 0 } }],
     });
     pass.setPipeline(this.compositor.pipeline);
+    pass.setBindGroup(0, bindGroup);
+    pass.draw(3);
+    pass.end();
+  }
+
+  /** Multiply a layer's premultiplied RGBA by a mask target's coverage. */
+  private maskApplyPass(
+    encoder: GPUCommandEncoder,
+    dest: GPUTexture,
+    layer: GPUTexture,
+    mask: GPUTexture,
+    channel: number,
+    slot: number
+  ): void {
+    const offset = slot * 256;
+    this.device.queue.writeBuffer(this.maskParamsBuffer, offset, new Float32Array([channel, 0, 0, 0]));
+    const bindGroup = this.device.createBindGroup({
+      layout: this.maskCompositor.layout,
+      entries: [
+        { binding: 0, resource: layer.createView() },
+        { binding: 1, resource: mask.createView() },
+        { binding: 2, resource: { buffer: this.maskParamsBuffer, offset, size: 16 } },
+      ],
+    });
+    const pass = encoder.beginRenderPass({
+      colorAttachments: [{ view: dest.createView(), loadOp: 'clear', storeOp: 'store', clearValue: { r: 0, g: 0, b: 0, a: 0 } }],
+    });
+    pass.setPipeline(this.maskCompositor.pipeline);
     pass.setBindGroup(0, bindGroup);
     pass.draw(3);
     pass.end();

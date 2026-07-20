@@ -154,6 +154,16 @@ const booleanUtil: NodeUtil = {
   hitTestLocal: () => false,
 };
 
+const maskUtil: NodeUtil = {
+  type: 'mask',
+  canHaveChildren: () => true, // its children are the mask content
+  isSpatial: () => true,
+  createDefaults: () => ({ transform: IDENTITY_TRANSFORM }),
+  // A mask is a coverage source, not drawn on its own — no bounds / hit area.
+  getLocalBounds: () => null,
+  hitTestLocal: () => false,
+};
+
 /** A registry pre-populated with the built-in node types. */
 export function createDefaultRegistry(): NodeRegistry {
   return new NodeRegistry()
@@ -163,5 +173,6 @@ export function createDefaultRegistry(): NodeRegistry {
     .register(imageUtil)
     .register(pathUtil)
     .register(textUtil)
-    .register(booleanUtil);
+    .register(booleanUtil)
+    .register(maskUtil);
 }

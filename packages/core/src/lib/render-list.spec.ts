@@ -2,7 +2,8 @@ import { createCamera } from './camera';
 import { SceneDocument } from './document';
 import { createSequentialIdFactory } from './id';
 import { transformPoint } from './matrix';
-import type { BooleanNode, GroupNode, ImageNode, LayerNode, PathNode } from './node';
+import type { BooleanNode, GroupNode, ImageNode, LayerNode, MaskNode, PathNode } from './node';
+import type { NodeId } from './id';
 import { ellipsePath, rectPath } from './path';
 import {
   buildRenderList,
@@ -215,5 +216,94 @@ describe('buildRenderList', () => {
       expect(ch).toBeGreaterThanOrEqual(0);
       expect(ch).toBeLessThanOrEqual(1);
     }
+  });
+});
+
+describe('buildRenderList — clip & mask', () => {
+  const white = { type: 'solid', color: { r: 1, g: 1, b: 1, a: 1 } } as const;
+
+  it('wraps a clipped path in a mask bracket + alpha-masked group', () => {
+    const doc = newDoc();
+    doc.insert<PathNode>({
+      type: 'path',
+      name: 'p',
+      path: rectPath(0, 0, 100, 100),
+      fill: white,
+      clip: { path: rectPath(0, 0, 50, 50) },
+    });
+    const cmds = buildRenderList(doc, createCamera());
+    expect(cmds.map((c) => c.op)).toEqual(['push-mask', 'draw-path', 'pop-mask', 'push-group', 'draw-path', 'pop-group']);
+    const pg = cmds.find((c) => c.op === 'push-group');
+    expect(pg?.op === 'push-group' && pg.mask).toEqual({ type: 'alpha' });
+  });
+
+  it('emits a mask node’s content as luminance coverage for a masked node', () => {
+    const doc = newDoc();
+    const mask = doc.insert<MaskNode>({ type: 'mask', name: 'm' });
+    doc.insert<PathNode>({ type: 'path', name: 'grad', path: ellipsePath(50, 50, 40, 40), fill: white }, { parentId: mask.id });
+    doc.insert<PathNode>({
+      type: 'path',
+      name: 'p',
+      path: rectPath(0, 0, 100, 100),
+      fill: white,
+      mask: { maskId: mask.id },
+    });
+    const cmds = buildRenderList(doc, createCamera());
+    // The mask node itself is not drawn in the main traversal.
+    expect(cmds.map((c) => c.op)).toEqual(['push-mask', 'draw-path', 'pop-mask', 'push-group', 'draw-path', 'pop-group']);
+    const pg = cmds.find((c) => c.op === 'push-group');
+    expect(pg?.op === 'push-group' && pg.mask).toEqual({ type: 'luminance' });
+  });
+
+  it('nests two brackets when a node has both a mask and a clip, opacity on the outer group', () => {
+    const doc = newDoc();
+    const mask = doc.insert<MaskNode>({ type: 'mask', name: 'm' });
+    doc.insert<PathNode>({ type: 'path', name: 'mc', path: rectPath(0, 0, 100, 100), fill: white }, { parentId: mask.id });
+    doc.insert<PathNode>({
+      type: 'path',
+      name: 'p',
+      path: rectPath(0, 0, 100, 100),
+      fill: white,
+      opacity: 0.5,
+      mask: { maskId: mask.id, type: 'alpha' },
+      clip: { path: rectPath(0, 0, 50, 50) },
+    });
+    const cmds = buildRenderList(doc, createCamera());
+    const pushGroups = cmds.filter((c) => c.op === 'push-group');
+    expect(pushGroups).toHaveLength(2);
+    // Outermost group carries the node opacity; inner is opacity 1.
+    expect(pushGroups[0].op === 'push-group' && pushGroups[0].opacity).toBe(0.5);
+    expect(pushGroups[1].op === 'push-group' && pushGroups[1].opacity).toBe(1);
+    expect(cmds.filter((c) => c.op === 'pop-group')).toHaveLength(2);
+  });
+
+  it('clips a group by wrapping its children', () => {
+    const doc = newDoc();
+    const g = doc.insert<GroupNode>({ type: 'group', name: 'g', clip: { path: rectPath(0, 0, 50, 50) } });
+    doc.insert<PathNode>({ type: 'path', name: 'a', path: rectPath(0, 0, 100, 100), fill: white }, { parentId: g.id });
+    doc.insert<PathNode>({ type: 'path', name: 'b', path: rectPath(0, 0, 100, 100), fill: white }, { parentId: g.id });
+    const cmds = buildRenderList(doc, createCamera());
+    expect(cmds.map((c) => c.op)).toEqual([
+      'push-mask',
+      'draw-path',
+      'pop-mask',
+      'push-group',
+      'draw-path',
+      'draw-path',
+      'pop-group',
+    ]);
+  });
+
+  it('ignores an invalid mask reference (renders the node normally)', () => {
+    const doc = newDoc();
+    doc.insert<PathNode>({
+      type: 'path',
+      name: 'p',
+      path: rectPath(0, 0, 100, 100),
+      fill: white,
+      mask: { maskId: 'nope' as NodeId },
+    });
+    const cmds = buildRenderList(doc, createCamera());
+    expect(cmds.map((c) => c.op)).toEqual(['draw-path']);
   });
 });
