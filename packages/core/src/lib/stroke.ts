@@ -11,10 +11,12 @@
  */
 
 import { flattenSubpaths, type Path, type SubPath } from './path';
-import { add, negate, normalize, scale, subtract, vec2, type Vec2 } from './vec2';
+import { add, dot, negate, normalize, scale, subtract, vec2, type Vec2 } from './vec2';
 
 export type StrokeCap = 'butt' | 'round' | 'square';
 export type StrokeJoin = 'miter' | 'round' | 'bevel';
+
+const cross = (a: Vec2, b: Vec2): number => a.x * b.y - a.y * b.x;
 
 export interface StrokeStyle {
   readonly width: number;
@@ -98,9 +100,35 @@ export function strokePath(path: Path, style: StrokeStyle, tol = 0.25): Path {
     }
   };
 
+  // One arc-segment's angle keeps its chord within `tol` of the true circle;
+  // a turn shallower than this is already covered by the meeting offset
+  // rectangles (to within `tol`), so no join geometry is needed there. This is
+  // what makes a flattened smooth curve — hundreds of near-collinear vertices —
+  // cost ~no join edges, instead of a full disc at every one.
+  const segAngle = 2 * Math.acos(Math.max(0, 1 - tol / half));
+
   const emitJoin = (v: Vec2, d0: Vec2, d1: Vec2): void => {
     if (join === 'round') {
-      emit(disc(v, half, steps));
+      // Only the outer arc across the actual turn, not a whole disc. The convex
+      // (outer) side is opposite the turn direction (perp points left of dir).
+      const turn = Math.atan2(cross(d0, d1), dot(d0, d1));
+      if (Math.abs(turn) < segAngle) {
+        return; // shallower than one arc-segment — rectangles already meet
+      }
+      const s = turn > 0 ? -1 : 1; // outer offset sign
+      // Angle of the offset point s·perp(d) = (s·−d.y, s·d.x).
+      const a0 = Math.atan2(s * d0.x, -s * d0.y);
+      const a1 = Math.atan2(s * d1.x, -s * d1.y);
+      let delta = a1 - a0;
+      while (delta > Math.PI) delta -= 2 * Math.PI;
+      while (delta < -Math.PI) delta += 2 * Math.PI;
+      const nSeg = Math.max(1, Math.ceil(Math.abs(delta) / segAngle));
+      const fan: Vec2[] = [v];
+      for (let i = 0; i <= nSeg; i++) {
+        const a = a0 + (delta * i) / nSeg;
+        fan.push(vec2(v.x + Math.cos(a) * half, v.y + Math.sin(a) * half));
+      }
+      emit(fan);
       return;
     }
     const n0 = scale(perp(d0), half);

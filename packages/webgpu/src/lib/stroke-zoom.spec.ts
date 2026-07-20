@@ -2,6 +2,7 @@ import {
   buildRenderList,
   createCamera,
   createSequentialIdFactory,
+  ellipsePath,
   pointInPath,
   SceneDocument,
   type PathNode,
@@ -76,5 +77,40 @@ describe('stroked glyph renders no interior seam (end-to-end)', () => {
     }
     expect(checked).toBeGreaterThan(50);
     expect(strokeInFill).toBe(0);
+  });
+
+  // The arc-join optimisation skips joins at shallow turns; verify it leaves no
+  // gaps in the stroke of a smooth convex curve (a circle is all convex turns).
+  it('strokes a circle with a continuous, gap-free band', async () => {
+    const doc = SceneDocument.create({ idFactory: createSequentialIdFactory('n') });
+    doc.insert<PathNode>({
+      type: 'path',
+      name: 'ring',
+      path: ellipsePath(0, 0, 60, 60),
+      fill: undefined,
+      stroke: { paint: { type: 'solid', color: { r: 0.9, g: 0.5, b: 0.2, a: 1 } }, width: 6, join: 'round' },
+    });
+    const size = 200;
+    const zoom = 1.4;
+    const pan = { x: 100, y: 100 }; // centre the circle at world origin
+    const renderer = await WebGpuRenderer.create(makeCanvas(size), { colorSpace: 'srgb', dither: false });
+    renderer.setClearColor({ r: 0, g: 0, b: 0, a: 1 });
+    renderer.setRenderList(buildRenderList(doc, createCamera({ zoom, pan })));
+    const rb = await renderer.readback();
+    renderer.destroy();
+
+    // Sample the stroke centreline all the way round; every sample must be lit
+    // (the orange stroke), never background — a skipped join would show a gap.
+    const R = 60 * zoom;
+    let gaps = 0;
+    const N = 720;
+    for (let k = 0; k < N; k++) {
+      const a = (2 * Math.PI * k) / N;
+      const sx = Math.round(pan.x + Math.cos(a) * R);
+      const sy = Math.round(pan.y + Math.sin(a) * R);
+      const p = pixel(rb, sx, sy);
+      if (p.r + p.g + p.b < 60) gaps++; // background (unlit) on the centreline
+    }
+    expect(gaps).toBe(0);
   });
 });

@@ -168,3 +168,14 @@ fills, so compositing them separately equals filling them together. The heavier
 per-tile **winding backdrop** (2D bins for a single large connected shape) is
 still the deferred next step; cluster-splitting handles the common multi-part
 case without it.
+
+Complementary edge-count fix: stroking flattens curves to polylines and emitted
+a full round-join **disc** at every vertex — including the ~1000 near-collinear
+vertices a smooth glyph curve flattens into — so a single stroked letter carried
+~17k edges (vs ~30 for its fill). The round join now emits only the outer **arc**
+across the actual turn, and none at all where the turn is shallower than one
+arc-segment (there the offset rectangles already meet within tolerance). That
+drops a stroked glyph to ~3k edges (now dominated by the segment rectangles) with
+no visible change — verified by a gap-free-circle readback and an edge-count
+guard. Offsetting the curves as curves (few edges, like the fill) is the deeper
+follow-up.
