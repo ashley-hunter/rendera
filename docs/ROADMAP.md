@@ -158,11 +158,18 @@ so backend tests do **pixel readback** to assert colour correctness.
   coverage-multiply shared by both (a clip is an alpha mask of the filled clip
   path), composing by intersection. Soft/gradient/image masks, geometric clips,
   and SVG `<clipPath>`/`<mask>`. *(Per-unit remapping + filter masks to come.)*
+- ✅ **Filters & effects (ADR 0012):** non-destructive `effects?: Effect[]` on any
+  spatial node — Gaussian **blur**, **drop shadow**, **outer glow** — parametric
+  op-lists evaluated at render (never baked), in local space so they scale with
+  zoom. A separable-blur + silhouette pair on the offscreen layer, applied after
+  clip/mask, before opacity/blend; effects chain in order. *(Inner shadow/glow,
+  colour adjustments, and effect-result caching are follow-ups.)*
 
-## Phase 6 — Effects & non-destructive stack  ⬜  → `@rendera/effects`
+## Phase 6 — Effects & non-destructive stack  🔨  → `@rendera/effects`
 
-- **Adjustment layers** (curves, levels, hue/sat) and **layer effects** (blur,
-  drop shadow, glow) as **parametric op-lists evaluated at render** — never baked.
+- ✅ **Layer effects (ADR 0012):** blur, drop shadow, glow as parametric op-lists
+  evaluated at render — never baked (shipped early on the vector layer).
+- **Adjustment layers** (curves, levels, hue/sat), and inner shadow/glow.
 - **Effect DAG caching** keyed by content hash + dirty flags; correct **group
   isolation** for non-separable blends.
 - **Showcase:** a non-destructive effect stack that stays fully re-editable.

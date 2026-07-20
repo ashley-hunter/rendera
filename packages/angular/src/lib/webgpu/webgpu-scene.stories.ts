@@ -2,6 +2,7 @@ import type { Meta, StoryObj } from '@storybook/angular';
 import { createBlendScene } from './blend-scene';
 import { createBooleanScene } from './boolean-scene';
 import { createClipMaskScene } from './clip-mask-scene';
+import { createEffectsScene } from './effects-scene';
 import { createGradientScene } from './gradient-scene';
 import { createImageSceneSource } from './image-scene';
 import { createSvgScene } from './svg-scene';
@@ -104,4 +105,15 @@ export const SvgImport: Story = {
  */
 export const ClipAndMask: Story = {
   args: { scene: createClipMaskScene() },
+};
+
+/**
+ * Non-destructive effects (ADR 0012): a floating card with a soft DROP SHADOW, a
+ * star with a coloured OUTER GLOW, a frosted circle under a Gaussian BLUR, and a
+ * card that chains a glow then a shadow. Effects are parametric op-lists
+ * evaluated at render — never baked — so they re-resolve and stay smooth at any
+ * zoom.
+ */
+export const Effects: Story = {
+  args: { scene: createEffectsScene() },
 };
