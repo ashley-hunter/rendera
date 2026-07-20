@@ -145,3 +145,26 @@ left edge of very wide content) is inherent to ray-crossing winding; a per-tile
 *winding backdrop* for edges that fully span a tile — the piet-gpu coarse-raster
 approach — is the next step to bound it, and is deferred as a heavier, winding-
 correctness-sensitive change.
+
+## Follow-up: per-cluster draw splitting
+
+The binning above is by **Y only**, so a fragment tests every edge whose row-
+band it shares — including edges far off-screen to its right, which the winding
+ray still has to cross. A whole text run emitted as one draw-path therefore made
+every on-screen fragment test *every* glyph's edges (all glyphs share a
+baseline, so all land in the same few bands): at high zoom into one glyph the
+GPU was doing ~N× the necessary work for N glyphs, the cause of the sluggish
+high-zoom text.
+
+`buildRenderList` now splits a vector shape into **bbox-connected clusters**
+(union-find over subpath bounding boxes) and emits one draw-path per cluster. A
+glyph and its counters (overlapping bboxes) stay one cluster; separate glyphs
+become separate draws, each with a tight screen bbox and its *own* band table.
+Off-screen clusters are culled by their bbox quad (zero fragments); on-screen
+fragments only test their cluster's edges. A single connected shape stays one
+draw (a no-op). This is cheap, general (helps any multi-part path — icons, dashed
+runs, scattered marks), and correct because disjoint-bbox clusters have disjoint
+fills, so compositing them separately equals filling them together. The heavier
+per-tile **winding backdrop** (2D bins for a single large connected shape) is
+still the deferred next step; cluster-splitting handles the common multi-part
+case without it.

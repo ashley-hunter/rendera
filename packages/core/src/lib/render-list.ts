@@ -31,6 +31,7 @@ import {
   type FillRule,
   type Path,
   type PathEdge,
+  type SubPath,
 } from './path';
 import { strokePath } from './stroke';
 import { vec2 } from './vec2';
@@ -254,8 +255,73 @@ interface PreparedGeom {
 }
 interface GeomEntry {
   sig: string;
-  fill: PreparedGeom | null;
-  stroke: PreparedGeom | null;
+  fill: readonly PreparedGeom[];
+  stroke: readonly PreparedGeom[];
+}
+
+/** Do two AABBs overlap (with a small pad so touching bboxes group)? */
+function bboxOverlap(a: Bounds, b: Bounds, pad: number): boolean {
+  return a.minX - pad <= b.maxX && b.minX - pad <= a.maxX && a.minY - pad <= b.maxY && b.minY - pad <= a.maxY;
+}
+
+/**
+ * Split a path into groups of subpaths whose bounding boxes connect (union-find
+ * over bbox overlap). Disjoint groups — the separate glyphs of a text run, the
+ * scattered pieces of an icon — become independent draw-paths, each with a tight
+ * screen bbox. At high zoom that lets the GPU cull the groups that fall off
+ * screen and shrinks every fragment's per-band edge list to just the nearby
+ * group, instead of every fragment testing the whole run's edges (the winding
+ * ray spans the row). A single connected shape stays one group (a no-op).
+ */
+function clusterByBbox(path: Path): Path[] {
+  const subs = path.subpaths;
+  const n = subs.length;
+  if (n <= 1) {
+    return n === 1 ? [path] : [];
+  }
+  const boxes = subs.map((sp) => pathBounds({ subpaths: [sp] }));
+  const parent = Array.from({ length: n }, (_, i) => i);
+  const find = (i: number): number => {
+    let r = i;
+    while (parent[r] !== r) r = parent[r];
+    while (parent[i] !== r) {
+      const next = parent[i];
+      parent[i] = r;
+      i = next;
+    }
+    return r;
+  };
+  const pad = 0.5;
+  for (let i = 0; i < n; i++) {
+    for (let j = i + 1; j < n; j++) {
+      const bi = boxes[i];
+      const bj = boxes[j];
+      if (bi && bj && find(i) !== find(j) && bboxOverlap(bi, bj, pad)) {
+        parent[find(i)] = find(j);
+      }
+    }
+  }
+  const groups = new Map<number, SubPath[]>();
+  for (let i = 0; i < n; i++) {
+    const r = find(i);
+    const g = groups.get(r);
+    if (g) g.push(subs[i]);
+    else groups.set(r, [subs[i]]);
+  }
+  return [...groups.values()].map((subpaths) => ({ subpaths }));
+}
+
+/** Edges + bounds for each bbox-connected group of a path (skips empty groups). */
+function prepareClusters(path: Path): PreparedGeom[] {
+  const out: PreparedGeom[] = [];
+  for (const cluster of clusterByBbox(path)) {
+    const edges = pathEdges(cluster);
+    const bounds = pathBounds(cluster);
+    if (bounds && edges.length > 0) {
+      out.push({ edges, bounds });
+    }
+  }
+  return out;
 }
 
 /** Cubic→quad tolerance in local units, scaled to the shape so quality is
@@ -440,12 +506,9 @@ export function buildRenderList(
       return cached;
     }
     const tol = localTolerance(pathBounds(localPath));
-    const fillQuads = toQuadraticPath(localPath, tol);
-    const fillEdges = pathEdges(fillQuads);
-    const fillBounds = pathBounds(fillQuads);
-    const fill = fillBounds && fillEdges.length > 0 ? { edges: fillEdges, bounds: fillBounds } : null;
+    const fill = prepareClusters(toQuadraticPath(localPath, tol));
 
-    let strokeGeom: PreparedGeom | null = null;
+    let strokeGeom: PreparedGeom[] = [];
     if (stroke) {
       // Stroke the shape's *resolved* outline, not the raw contours. Fonts (and
       // hand-drawn art) routinely self-overlap — a glyph's crossbar running back
@@ -466,11 +529,7 @@ export function buildRenderList(
         },
         tol
       );
-      const strokeEdges = pathEdges(outline);
-      const strokeBounds = pathBounds(outline);
-      if (strokeBounds && strokeEdges.length > 0) {
-        strokeGeom = { edges: strokeEdges, bounds: strokeBounds };
-      }
+      strokeGeom = prepareClusters(outline);
     }
     const entry: GeomEntry = { sig, fill, stroke: strokeGeom };
     geomCache.set(id, entry);
@@ -497,33 +556,40 @@ export function buildRenderList(
     const geom = prepareGeom(id, localPath, stroke);
     const screenToLocal = invert(screenMat) ?? IDENTITY;
 
-    if ((fill || !stroke) && geom.fill) {
-      commands.push({
-        op: 'draw-path',
-        nodeId: id,
-        paint: fill ?? { type: 'solid', color: DEFAULT_FILL },
-        screenToLocal,
-        fillRule,
-        opacity,
-        blend,
-        edges: transformEdges(geom.fill.edges, screenMat),
-        bounds: transformBoundsAabb(geom.fill.bounds, screenMat),
-      });
+    // One draw-path per bbox-connected cluster (e.g. per glyph in a text run) so
+    // off-screen clusters cull and each fragment only tests its cluster's edges.
+    if (fill || !stroke) {
+      const paint = fill ?? { type: 'solid', color: DEFAULT_FILL };
+      for (const c of geom.fill) {
+        commands.push({
+          op: 'draw-path',
+          nodeId: id,
+          paint,
+          screenToLocal,
+          fillRule,
+          opacity,
+          blend,
+          edges: transformEdges(c.edges, screenMat),
+          bounds: transformBoundsAabb(c.bounds, screenMat),
+        });
+      }
     }
 
-    if (stroke && geom.stroke) {
-      commands.push({
-        op: 'draw-path',
-        nodeId: id,
-        paint: stroke.paint,
-        screenToLocal,
-        fillRule: 'nonzero',
-        opacity,
-        blend,
-        edges: transformEdges(geom.stroke.edges, screenMat),
-        bounds: transformBoundsAabb(geom.stroke.bounds, screenMat),
-        hardInterior: true,
-      });
+    if (stroke) {
+      for (const c of geom.stroke) {
+        commands.push({
+          op: 'draw-path',
+          nodeId: id,
+          paint: stroke.paint,
+          screenToLocal,
+          fillRule: 'nonzero',
+          opacity,
+          blend,
+          edges: transformEdges(c.edges, screenMat),
+          bounds: transformBoundsAabb(c.bounds, screenMat),
+          hardInterior: true,
+        });
+      }
     }
   };
 
