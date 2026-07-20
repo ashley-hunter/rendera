@@ -51,3 +51,26 @@ express them as a **non-destructive `boolean` node**.
   non-trivial per frame; a content-keyed cache is a deferred optimization.
 - Deferred: robust degenerate handling, boolean of open paths / strokes,
   and baking a boolean back into a plain path (destructive apply).
+
+## Follow-up: self-overlap removal (correct stroking)
+
+`resolveOverlaps(path)` reuses the same split–classify–reassemble machinery on a
+*single* path to strip self-overlaps: it splits every cubic at its intersections
+with every other cubic (self-intersections, not A-vs-B), then keeps only the
+pieces with the nonzero-filled region on exactly one side — dropping interior
+seams (inside on both sides) and stray exterior edges — and reorients each kept
+edge so the inside is consistently on one side, so the reassembled contours fill
+identically.
+
+The motivation is **stroking**. Fonts (and hand-drawn art) routinely self-
+overlap: a glyph's crossbar runs back through its body, accent marks sit over
+stems, composite glyphs stack components. Nonzero *fill* hides the overlap, but
+*stroking the raw contour* inks those interior seams as dark lines inside the
+letter — visible on stroked display text, worst at high zoom. `prepareGeom` now
+strokes `resolveOverlaps(localPath)` instead of the raw path (the fill still uses
+the raw path — nonzero fill is overlap-invariant, and resolving costs nothing
+there). Verified two ways: a core test confirms the resolved fill matches the
+raw fill exactly while the 'e' crossbar seam's deep-interior stroke coverage
+drops from ~128 sample hits to 0, and an end-to-end GPU readback of a stroked
+'e' finds zero stroke pixels among 700+ deep-interior fill pixels (42 before the
+fix). Resolution is content-keyed cached in `prepareGeom`, ~sub-20ms per glyph.

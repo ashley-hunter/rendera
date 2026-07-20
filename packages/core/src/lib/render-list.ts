@@ -19,7 +19,7 @@ import type { BlendMode } from './blend';
 import { worldToScreenMatrix, type Camera } from './camera';
 import type { SceneDocument } from './document';
 import type { NodeId } from './id';
-import { booleanPath } from './boolean';
+import { booleanPath, resolveOverlaps } from './boolean';
 import { compose, fromScaling, fromTranslation, invert, transformPoint, IDENTITY, type Mat2D } from './matrix';
 import type { BooleanNode, Effect, GroupNode, ImageNode, LayerNode, MaskType, PathNode, SpatialNode, Stroke, TextNode } from './node';
 import type { Paint } from './paint';
@@ -447,11 +447,17 @@ export function buildRenderList(
 
     let strokeGeom: PreparedGeom | null = null;
     if (stroke) {
+      // Stroke the shape's *resolved* outline, not the raw contours. Fonts (and
+      // hand-drawn art) routinely self-overlap — a glyph's crossbar running back
+      // through its body, accent marks over stems — which nonzero fill hides but
+      // stroking would ink as spurious seams deep inside the shape. Removing the
+      // overlaps first leaves only the visible edge to stroke.
+      const strokeSource = resolveOverlaps(localPath);
       // Flatten/round the stroke at the SAME tolerance as the fill. Stroking's
       // default is 5x coarser, which at high zoom shows as faceted edges and
       // chunky (octagonal) round joins — ragged "borders" inside a stroked glyph.
       const outline = strokePath(
-        localPath,
+        strokeSource,
         {
           width: stroke.width,
           cap: stroke.cap,

@@ -270,6 +270,85 @@ export function booleanPath(a: Path, b: Path, op: BooleanOp): Path {
   return { subpaths: reassemble(selected) };
 }
 
+/**
+ * Remove self-overlaps from a single path: resolve every self-intersection and
+ * drop the edges that lie *interior* to the nonzero-filled region, leaving only
+ * the true boundary of the filled shape (exact curves).
+ *
+ * Fonts routinely define glyphs with overlapping contours — the 'e' crossbar
+ * running back through the body, accent marks laid over stems, composite glyphs.
+ * Nonzero fill hides the overlap, but *stroking* the raw contour inks those
+ * interior seams as spurious lines inside the letter. Stroking the resolved
+ * outline instead traces only the visible edge, matching Illustrator/Photoshop.
+ */
+export function resolveOverlaps(path: Path): Path {
+  const contours = pathToContours(path);
+  if (contours.length === 0) return path;
+
+  // 1. Split every cubic at its intersections with every *other* cubic (across
+  //    all contours, and non-adjacent within a contour) — i.e. self-intersections.
+  const flat: { ci: number; si: number; cubic: Cubic }[] = [];
+  contours.forEach((c, ci) => c.forEach((cubic, si) => flat.push({ ci, si, cubic })));
+  const params = new Map<string, number[]>();
+  for (let i = 0; i < flat.length; i++) {
+    for (let j = i + 1; j < flat.length; j++) {
+      const a = flat[i];
+      const b = flat[j];
+      // Adjacent segments in the same contour only touch at the shared endpoint
+      // (params ~0/1, filtered by splitContours); their interiors don't cross.
+      const hits: { ta: number; tb: number }[] = [];
+      intersectCubics(a.cubic, b.cubic, 0, 1, 0, 1, 0, hits);
+      for (const h of hits) {
+        pushInto(params, `${a.ci}:${a.si}`, h.ta);
+        pushInto(params, `${b.ci}:${b.si}`, h.tb);
+      }
+    }
+  }
+  if (params.size === 0) return path; // no self-intersections — nothing to resolve
+
+  const pieces = splitContours(contours, params);
+
+  // 2. Keep only boundary pieces: those with the filled region on exactly one
+  //    side. Interior seams (inside on both sides) and stray exterior edges
+  //    (outside on both) are dropped. Orient every kept edge so the inside sits
+  //    on the same side, so nonzero fill of the reassembly matches the original.
+  let diag = 0;
+  const b = pathBoundsLocal(path);
+  if (b) diag = Math.hypot(b.maxX - b.minX, b.maxY - b.minY);
+  const eps = Math.max(diag * 1e-4, 1e-3);
+  const kept: Cubic[] = [];
+  for (const c of pieces) {
+    const mid = evalCubic(c, 0.5);
+    const t = subtract(evalCubic(c, 0.5 + 1e-3), evalCubic(c, 0.5 - 1e-3));
+    const tl = Math.hypot(t.x, t.y) || 1;
+    const n = vec2((-t.y / tl) * eps, (t.x / tl) * eps); // left normal, scaled
+    const insidePlus = pointInPath(path, add(mid, n), 'nonzero');
+    const insideMinus = pointInPath(path, subtract(mid, n), 'nonzero');
+    if (insidePlus === insideMinus) continue; // interior seam or fully outside
+    kept.push(insidePlus ? c : reverseCubic(c)); // inside always on the +normal side
+  }
+
+  return { subpaths: reassemble(kept) };
+}
+
+/** Path bounds (local helper; avoids importing pathBounds to dodge a cycle). */
+function pathBoundsLocal(path: Path): { minX: number; minY: number; maxX: number; maxY: number } | null {
+  let minX = Infinity;
+  let minY = Infinity;
+  let maxX = -Infinity;
+  let maxY = -Infinity;
+  for (const c of pathToContours(path)) {
+    for (const cu of c) {
+      const bb = cubicBounds(cu);
+      minX = Math.min(minX, bb.minX);
+      minY = Math.min(minY, bb.minY);
+      maxX = Math.max(maxX, bb.maxX);
+      maxY = Math.max(maxY, bb.maxY);
+    }
+  }
+  return minX === Infinity ? null : { minX, minY, maxX, maxY };
+}
+
 /** Connect directed cubics end→start into closed subpaths. */
 function reassemble(pieces: Cubic[]): SubPath[] {
   const used = new Array<boolean>(pieces.length).fill(false);

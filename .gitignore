@@ -51,4 +51,4 @@ vitest.config.*.timestamp*
 __screenshots__/
 
 
-storybook-static
+storybook-static.vitest-attachments/
