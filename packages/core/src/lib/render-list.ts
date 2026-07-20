@@ -439,19 +439,27 @@ export function buildRenderList(
     if (cached && cached.sig === sig) {
       return cached;
     }
-    const fillQuads = toQuadraticPath(localPath, localTolerance(pathBounds(localPath)));
+    const tol = localTolerance(pathBounds(localPath));
+    const fillQuads = toQuadraticPath(localPath, tol);
     const fillEdges = pathEdges(fillQuads);
     const fillBounds = pathBounds(fillQuads);
     const fill = fillBounds && fillEdges.length > 0 ? { edges: fillEdges, bounds: fillBounds } : null;
 
     let strokeGeom: PreparedGeom | null = null;
     if (stroke) {
-      const outline = strokePath(localPath, {
-        width: stroke.width,
-        cap: stroke.cap,
-        join: stroke.join,
-        miterLimit: stroke.miterLimit,
-      });
+      // Flatten/round the stroke at the SAME tolerance as the fill. Stroking's
+      // default is 5x coarser, which at high zoom shows as faceted edges and
+      // chunky (octagonal) round joins — ragged "borders" inside a stroked glyph.
+      const outline = strokePath(
+        localPath,
+        {
+          width: stroke.width,
+          cap: stroke.cap,
+          join: stroke.join,
+          miterLimit: stroke.miterLimit,
+        },
+        tol
+      );
       const strokeEdges = pathEdges(outline);
       const strokeBounds = pathBounds(outline);
       if (strokeBounds && strokeEdges.length > 0) {
