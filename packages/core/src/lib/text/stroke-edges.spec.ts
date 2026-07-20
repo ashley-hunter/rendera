@@ -5,13 +5,13 @@ import { resolveOverlaps } from '../boolean';
 import { strokePath } from '../stroke';
 import { RenderaFont } from './font';
 
-// Stroking offsets curves as quadratics (a few exact edges per segment, like
-// the fill), not by flattening to line-segment rectangles with a join disc at
-// every vertex. That took a stroked glyph from ~17k edges to a couple hundred —
-// the dominant cost of stroked text at high zoom. Guard against a regression to
-// flattening.
+// The round join emits only the outer arc across the actual turn (and none at
+// all where the offset segments already meet within tolerance), instead of a
+// full disc at every flattened vertex. That kept a stroked glyph from exploding
+// to ~17k edges (a full 18-edge disc at each of ~1k smooth-curve vertices), the
+// dominant cost of stroked text at high zoom. Guard against that regressing.
 describe('stroke edge count stays bounded', () => {
-  it('offsets curves as curves, not thousands of facets', async () => {
+  it('does not emit a join disc at every flattened vertex', async () => {
     const p = fileURLToPath(new URL('./__fixtures__/CrimsonPro-Regular.ttf', import.meta.url));
     const d = readFileSync(p);
     const font = await RenderaFont.load(d.buffer.slice(d.byteOffset, d.byteOffset + d.byteLength));
@@ -21,8 +21,9 @@ describe('stroke edge count stays bounded', () => {
       const diag = Math.hypot(b.maxX - b.minX, b.maxY - b.minY);
       const tol = Math.min(0.5, Math.max(0.02, diag * 0.0004));
       const strokeEdges = pathEdges(strokePath(resolveOverlaps(raw), { width: 26, join: 'round' }, tol)).length;
-      // A curve-offset stroke is a few hundred edges; flattening was ~17k.
-      expect(strokeEdges).toBeLessThan(800);
+      // Segment rectangles dominate now (~a few thousand); the join blow-up
+      // (~17k) must not return.
+      expect(strokeEdges).toBeLessThan(6000);
     }
   });
 });

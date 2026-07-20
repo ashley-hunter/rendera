@@ -169,18 +169,13 @@ per-tile **winding backdrop** (2D bins for a single large connected shape) is
 still the deferred next step; cluster-splitting handles the common multi-part
 case without it.
 
-Complementary edge-count fix: **stroke curves are offset as curves, not
-flattened.** The stroker used to flatten every segment to a polyline and emit an
-offset *rectangle* per line plus a full round-join *disc* per vertex, so one
-stroked letter carried ~17k edges against ~30 for its fill — and every fragment
-under the stroke then walked its band's share of them. Now each segment's offset
-is approximated by **quadratics** (a curve's offset isn't itself a quadratic, so
-it's fit adaptively — subdividing until the offset is within `tol`, typically one
-to a few quads per side), joins land only at real corners (a turn shallower than
-one arc-segment needs none — the offset pieces already meet), and the round join
-emits just the outer **arc**, not a disc. A stroked glyph drops to ~200 edges —
-the same order as its fill — and, being exact quadratics, stays razor-sharp at
-any zoom instead of faceting. Verified by readbacks (a stroked glyph has no
-interior seam, a stroked circle's band is continuous and stays smooth/unfaceted
-at high zoom) and an edge-count guard. The pieces are unioned by nonzero fill as
-before, so tight inner curvature (radius < half) still resolves correctly.
+Complementary edge-count fix: stroking flattens curves to polylines and emitted
+a full round-join **disc** at every vertex — including the ~1000 near-collinear
+vertices a smooth glyph curve flattens into — so a single stroked letter carried
+~17k edges (vs ~30 for its fill). The round join now emits only the outer **arc**
+across the actual turn, and none at all where the turn is shallower than one
+arc-segment (there the offset rectangles already meet within tolerance). That
+drops a stroked glyph to ~3k edges (now dominated by the segment rectangles) with
+no visible change — verified by a gap-free-circle readback and an edge-count
+guard. Offsetting the curves as curves (few edges, like the fill) is the deeper
+follow-up.

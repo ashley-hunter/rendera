@@ -1,18 +1,16 @@
 /**
  * Stroking — convert a path's centerline into a fill outline (ADR 0007).
  *
- * Each segment becomes an offset piece (a curve offset by ±half on each side,
- * capped at its ends), each corner a join (miter / round / bevel), and each open
- * end a cap. Crucially the offset of a curve is approximated by *quadratics*, not
- * flattened to line segments — so a stroked curve carries a handful of exact
- * edges (like its fill) and stays razor-sharp at any zoom, instead of thousands
- * of tiny facets. All pieces are emitted with a consistent winding, so filling
- * the result with the **nonzero** rule yields their union — the stroke — which
- * the backend rasterizes with the ordinary analytic fill (AA, binning,
- * compositing for free).
+ * The centerline is flattened to polylines, then each segment becomes an
+ * offset rectangle, each interior vertex a join (miter / round / bevel), and
+ * each open end a cap (butt / round / square). All these convex pieces are
+ * emitted as sub-paths oriented the same way, so filling the result with the
+ * **nonzero** rule yields their union — the stroke. The backend then rasterizes
+ * that outline with the ordinary analytic fill, so strokes inherit the
+ * resolution-independent AA, band-binning, and compositor for free.
  */
 
-import { toQuadraticPath, type Path, type SubPath } from './path';
+import { flattenSubpaths, type Path, type SubPath } from './path';
 import { add, dot, negate, normalize, scale, subtract, vec2, type Vec2 } from './vec2';
 
 export type StrokeCap = 'butt' | 'round' | 'square';
@@ -29,7 +27,7 @@ export interface StrokeStyle {
 
 const perp = (v: Vec2): Vec2 => vec2(-v.y, v.x);
 
-/** Signed area × 2 of a polygon; sign is the winding. */
+/** Signed area × 2 (screen space, y-down); >0 and <0 are opposite windings. */
 function signedArea(poly: readonly Vec2[]): number {
   let a = 0;
   for (let i = 0; i < poly.length; i++) {
@@ -69,29 +67,21 @@ function toSubPath(poly: Vec2[]): SubPath {
   return { start: poly[0], closed: true, segments: poly.slice(1).map((to) => ({ type: 'line', to }) as const) };
 }
 
-// --- Quadratic helpers (Y-agnostic) ------------------------------------------
-
-const qEval = (p0: Vec2, c: Vec2, p1: Vec2, t: number): Vec2 => {
-  const u = 1 - t;
-  return vec2(u * u * p0.x + 2 * u * t * c.x + t * t * p1.x, u * u * p0.y + 2 * u * t * c.y + t * t * p1.y);
-};
-/** Tangent (unnormalized derivative) of a quadratic at t. */
-const qTangent = (p0: Vec2, c: Vec2, p1: Vec2, t: number): Vec2 =>
-  vec2(2 * ((1 - t) * (c.x - p0.x) + t * (p1.x - c.x)), 2 * ((1 - t) * (c.y - p0.y) + t * (p1.y - c.y)));
-
-/** The sub-quadratic over [t0, t1] (de Casteljau). */
-function subQuad(p0: Vec2, c: Vec2, p1: Vec2, t0: number, t1: number): [Vec2, Vec2, Vec2] {
-  const a0 = qEval(p0, c, p1, t0);
-  const a1 = qEval(p0, c, p1, t1);
-  // Control = intersection of the endpoint tangents (exact for a quadratic).
-  const m = lineIntersect(a0, qTangent(p0, c, p1, t0), a1, qTangent(p0, c, p1, t1));
-  return [a0, m ?? vec2((a0.x + a1.x) / 2, (a0.y + a1.y) / 2), a1];
+/** Drop consecutive (near-)duplicate points that would give zero-length segments. */
+function dedupe(points: readonly Vec2[]): Vec2[] {
+  const out: Vec2[] = [];
+  for (const p of points) {
+    const last = out[out.length - 1];
+    if (!last || Math.hypot(p.x - last.x, p.y - last.y) > 1e-6) {
+      out.push(p);
+    }
+  }
+  return out;
 }
 
 /**
  * Build the fill outline of `path` stroked with `style`. Fill the result with
- * the nonzero rule. Widths and coordinates are in the path's own space; `tol`
- * bounds the offset-curve and join approximation error (path units).
+ * the nonzero rule. Widths and coordinates are in the path's own space.
  */
 export function strokePath(path: Path, style: StrokeStyle, tol = 0.25): Path {
   const half = style.width / 2;
@@ -102,85 +92,32 @@ export function strokePath(path: Path, style: StrokeStyle, tol = 0.25): Path {
   const join: StrokeJoin = style.join ?? 'miter';
   const miterLimit = style.miterLimit ?? 4;
   const steps = Math.max(8, Math.ceil(Math.PI / Math.acos(Math.max(0, 1 - tol / half))));
-  // One arc-segment's angle keeps its chord within `tol` of the true circle; a
-  // turn shallower than this needs no join (the offset pieces already meet).
-  const segAngle = 2 * Math.acos(Math.max(0, 1 - tol / half));
 
-  const subpaths: SubPath[] = [];
-  const emitPoly = (poly: Vec2[]): void => {
+  const pieces: Vec2[][] = [];
+  const emit = (poly: Vec2[]): void => {
     if (poly.length >= 3) {
-      subpaths.push(toSubPath(oriented(poly)));
+      pieces.push(oriented(poly));
     }
   };
 
-  // Offset one quadratic on both sides into a curved piece (two offset quads
-  // joined by straight end-caps), subdividing until the offset is within `tol`.
-  const emitQuadOffset = (p0: Vec2, c: Vec2, p1: Vec2, depth: number): void => {
-    const t0 = normalize(qTangent(p0, c, p1, 0));
-    const t1 = normalize(qTangent(p0, c, p1, 1));
-    const n0 = perp(t0);
-    const n1 = perp(t1);
-    const pPlus0 = add(p0, scale(n0, half));
-    const pPlus1 = add(p1, scale(n1, half));
-    const pMinus0 = subtract(p0, scale(n0, half));
-    const pMinus1 = subtract(p1, scale(n1, half));
-    const cPlus = lineIntersect(pPlus0, t0, pPlus1, t1) ?? vec2((pPlus0.x + pPlus1.x) / 2, (pPlus0.y + pPlus1.y) / 2);
-    const cMinus =
-      lineIntersect(pMinus0, t0, pMinus1, t1) ?? vec2((pMinus0.x + pMinus1.x) / 2, (pMinus0.y + pMinus1.y) / 2);
-
-    if (depth < 10) {
-      // Error at the midpoint: true offset vs the offset-quad approximation.
-      const mid = qEval(p0, c, p1, 0.5);
-      const nMid = perp(normalize(qTangent(p0, c, p1, 0.5)));
-      const truePlus = add(mid, scale(nMid, half));
-      const trueMinus = subtract(mid, scale(nMid, half));
-      const approxPlus = qEval(pPlus0, cPlus, pPlus1, 0.5);
-      const approxMinus = qEval(pMinus0, cMinus, pMinus1, 0.5);
-      const err = Math.max(
-        Math.hypot(truePlus.x - approxPlus.x, truePlus.y - approxPlus.y),
-        Math.hypot(trueMinus.x - approxMinus.x, trueMinus.y - approxMinus.y)
-      );
-      if (err > tol) {
-        const [la0, lc, lm] = subQuad(p0, c, p1, 0, 0.5);
-        const [, rc, rp1] = subQuad(p0, c, p1, 0.5, 1);
-        emitQuadOffset(la0, lc, lm, depth + 1);
-        emitQuadOffset(lm, rc, rp1, depth + 1);
-        return;
-      }
-    }
-    // Emit the curved piece with a consistent winding (match oriented()'s ≤0).
-    const area = signedArea([pPlus0, pPlus1, pMinus1, pMinus0]);
-    const fwd: SubPath = {
-      start: pPlus0,
-      closed: true,
-      segments: [
-        { type: 'quad', control: cPlus, to: pPlus1 },
-        { type: 'line', to: pMinus1 },
-        { type: 'quad', control: cMinus, to: pMinus0 },
-        { type: 'line', to: pPlus0 },
-      ],
-    };
-    const rev: SubPath = {
-      start: pPlus0,
-      closed: true,
-      segments: [
-        { type: 'line', to: pMinus0 },
-        { type: 'quad', control: cMinus, to: pMinus1 },
-        { type: 'line', to: pPlus1 },
-        { type: 'quad', control: cPlus, to: pPlus0 },
-      ],
-    };
-    subpaths.push(area > 0 ? rev : fwd);
-  };
+  // One arc-segment's angle keeps its chord within `tol` of the true circle;
+  // a turn shallower than this is already covered by the meeting offset
+  // rectangles (to within `tol`), so no join geometry is needed there. This is
+  // what makes a flattened smooth curve — hundreds of near-collinear vertices —
+  // cost ~no join edges, instead of a full disc at every one.
+  const segAngle = 2 * Math.acos(Math.max(0, 1 - tol / half));
 
   const emitJoin = (v: Vec2, d0: Vec2, d1: Vec2): void => {
     if (join === 'round') {
+      // Only the outer arc across the actual turn, not a whole disc. The convex
+      // (outer) side is opposite the turn direction (perp points left of dir).
       const turn = Math.atan2(cross(d0, d1), dot(d0, d1));
       if (Math.abs(turn) < segAngle) {
-        return; // shallower than one arc-segment — pieces already meet
+        return; // shallower than one arc-segment — rectangles already meet
       }
-      const s = turn > 0 ? -1 : 1; // outer offset sign (perp points left of dir)
-      const a0 = Math.atan2(s * d0.x, -s * d0.y); // angle of s·perp(d0)
+      const s = turn > 0 ? -1 : 1; // outer offset sign
+      // Angle of the offset point s·perp(d) = (s·−d.y, s·d.x).
+      const a0 = Math.atan2(s * d0.x, -s * d0.y);
       const a1 = Math.atan2(s * d1.x, -s * d1.y);
       let delta = a1 - a0;
       while (delta > Math.PI) delta -= 2 * Math.PI;
@@ -191,26 +128,26 @@ export function strokePath(path: Path, style: StrokeStyle, tol = 0.25): Path {
         const a = a0 + (delta * i) / nSeg;
         fan.push(vec2(v.x + Math.cos(a) * half, v.y + Math.sin(a) * half));
       }
-      emitPoly(fan);
+      emit(fan);
       return;
     }
     const n0 = scale(perp(d0), half);
     const n1 = scale(perp(d1), half);
     if (join === 'bevel') {
-      emitPoly([v, add(v, n0), add(v, n1)]);
-      emitPoly([v, subtract(v, n0), subtract(v, n1)]);
+      emit([v, add(v, n0), add(v, n1)]);
+      emit([v, subtract(v, n0), subtract(v, n1)]);
       return;
     }
-    // Miter each side; the outer side is the real join, the inner a small
+    // Miter each side; the outer side is the real join, the inner is a small
     // harmless overlap. Fall back to bevel past the miter limit.
     for (const s of [1, -1]) {
       const o0 = add(v, scale(n0, s));
       const o1 = add(v, scale(n1, s));
       const m = lineIntersect(o0, d0, o1, d1);
       if (m && Math.hypot(m.x - v.x, m.y - v.y) / half <= miterLimit) {
-        emitPoly([v, o0, m, o1]);
+        emit([v, o0, m, o1]);
       } else {
-        emitPoly([v, o0, o1]);
+        emit([v, o0, o1]);
       }
     }
   };
@@ -220,67 +157,46 @@ export function strokePath(path: Path, style: StrokeStyle, tol = 0.25): Path {
       return;
     }
     if (cap === 'round') {
-      emitPoly(disc(end, half, steps));
+      emit(disc(end, half, steps));
       return;
     }
     const n = scale(perp(outDir), half);
     const e = add(end, scale(outDir, half));
-    emitPoly([add(end, n), add(e, n), subtract(e, n), subtract(end, n)]);
+    emit([add(end, n), add(e, n), subtract(e, n), subtract(end, n)]);
   };
 
-  // Work in quadratics (cubics → quads at `tol`); lines stay exact.
-  for (const sp of toQuadraticPath(path, tol).subpaths) {
-    // Gather segments as {p0, p1, control?} plus start/end tangents.
-    type Seg = { p0: Vec2; p1: Vec2; startDir: Vec2; endDir: Vec2; control?: Vec2 };
-    const segs: Seg[] = [];
-    let cur = sp.start;
-    for (const s of sp.segments) {
-      if (s.type === 'line') {
-        const d = subtract(s.to, cur);
-        if (Math.hypot(d.x, d.y) > 1e-9) {
-          const n = normalize(d);
-          segs.push({ p0: cur, p1: s.to, startDir: n, endDir: n });
-        }
-        cur = s.to;
-      } else if (s.type === 'quad') {
-        const startDir = normalize(qTangent(cur, s.control, s.to, 0));
-        const endDir = normalize(qTangent(cur, s.control, s.to, 1));
-        segs.push({ p0: cur, p1: s.to, startDir, endDir, control: s.control });
-        cur = s.to;
+  for (const raw of flattenSubpaths(path, tol)) {
+    const pts = dedupe(raw.points);
+    const closed = raw.closed;
+    if (pts.length < 2) {
+      if (pts.length === 1 && cap === 'round') {
+        emit(disc(pts[0], half, steps));
       }
-    }
-    // Add the implicit closing edge (a closed subpath need not restate it).
-    if (sp.closed && segs.length > 0 && Math.hypot(cur.x - sp.start.x, cur.y - sp.start.y) > 1e-9) {
-      const n = normalize(subtract(sp.start, cur));
-      segs.push({ p0: cur, p1: sp.start, startDir: n, endDir: n });
-      cur = sp.start;
-    }
-    if (segs.length === 0) {
-      // A lone move (isolated point) still gets a round dot.
-      if (cap === 'round') emitPoly(disc(sp.start, half, steps));
       continue;
     }
-    const closed = sp.closed || Math.hypot(cur.x - sp.start.x, cur.y - sp.start.y) <= 1e-6;
-
-    for (const seg of segs) {
-      if (seg.control) {
-        emitQuadOffset(seg.p0, seg.control, seg.p1, 0);
-      } else {
-        const n = scale(perp(seg.startDir), half);
-        emitPoly([add(seg.p0, n), add(seg.p1, n), subtract(seg.p1, n), subtract(seg.p0, n)]);
-      }
+    const segCount = closed ? pts.length : pts.length - 1;
+    const dirs: Vec2[] = [];
+    for (let i = 0; i < segCount; i++) {
+      const a = pts[i];
+      const b = pts[(i + 1) % pts.length];
+      const d = normalize(subtract(b, a));
+      dirs.push(d);
+      const n = scale(perp(d), half);
+      emit([add(a, n), add(b, n), subtract(b, n), subtract(a, n)]);
     }
-    // Joins at the vertices between consecutive segments (and the wrap if closed).
-    for (let i = 0; i < segs.length - 1; i++) {
-      emitJoin(segs[i].p1, segs[i].endDir, segs[i + 1].startDir);
+    // Joins at interior vertices (every vertex when closed).
+    const joinCount = closed ? pts.length : pts.length - 2;
+    for (let k = 0; k < joinCount; k++) {
+      const vi = closed ? k : k + 1;
+      const s0 = closed ? (k - 1 + segCount) % segCount : k;
+      const s1 = closed ? k : k + 1;
+      emitJoin(pts[vi], dirs[s0], dirs[s1]);
     }
-    if (closed) {
-      emitJoin(segs[segs.length - 1].p1, segs[segs.length - 1].endDir, segs[0].startDir);
-    } else {
-      emitCap(segs[0].p0, negate(segs[0].startDir));
-      emitCap(segs[segs.length - 1].p1, segs[segs.length - 1].endDir);
+    if (!closed) {
+      emitCap(pts[0], negate(dirs[0]));
+      emitCap(pts[pts.length - 1], dirs[dirs.length - 1]);
     }
   }
 
-  return { subpaths };
+  return { subpaths: pieces.map(toSubPath) };
 }
