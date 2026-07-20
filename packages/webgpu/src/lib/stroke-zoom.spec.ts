@@ -113,4 +113,40 @@ describe('stroked glyph renders no interior seam (end-to-end)', () => {
     }
     expect(gaps).toBe(0);
   });
+
+  // Curve-offset strokes are exact quadratics, so the outer boundary stays a
+  // clean circle at high zoom instead of faceting. Just inside the ideal outer
+  // edge must be lit at every angle; just outside must be background.
+  it('keeps a stroked curve smooth (unfaceted) at high zoom', async () => {
+    const doc = SceneDocument.create({ idFactory: createSequentialIdFactory('n') });
+    doc.insert<PathNode>({
+      type: 'path',
+      name: 'ring',
+      path: ellipsePath(0, 0, 20, 20),
+      fill: undefined,
+      stroke: { paint: { type: 'solid', color: { r: 0.9, g: 0.5, b: 0.2, a: 1 } }, width: 4, join: 'round' },
+    });
+    const size = 300;
+    const zoom = 6; // screen outer radius = (20 + 2) * 6 = 132 px
+    const pan = { x: 150, y: 150 };
+    const renderer = await WebGpuRenderer.create(makeCanvas(size), { colorSpace: 'srgb', dither: false });
+    renderer.setClearColor({ r: 0, g: 0, b: 0, a: 1 });
+    renderer.setRenderList(buildRenderList(doc, createCamera({ zoom, pan })));
+    const rb = await renderer.readback();
+    renderer.destroy();
+
+    const outer = (20 + 2) * zoom; // ideal outer edge radius, px
+    let inFacets = 0;
+    let outFacets = 0;
+    const N = 720;
+    for (let k = 0; k < N; k++) {
+      const a = (2 * Math.PI * k) / N;
+      const insideP = pixel(rb, Math.round(pan.x + Math.cos(a) * (outer - 3)), Math.round(pan.y + Math.sin(a) * (outer - 3)));
+      const outsideP = pixel(rb, Math.round(pan.x + Math.cos(a) * (outer + 3)), Math.round(pan.y + Math.sin(a) * (outer + 3)));
+      if (insideP.r + insideP.g + insideP.b < 60) inFacets++; // dip inward (a facet notch)
+      if (outsideP.r + outsideP.g + outsideP.b > 120) outFacets++; // bulge outward
+    }
+    expect(inFacets).toBe(0);
+    expect(outFacets).toBe(0);
+  });
 });
