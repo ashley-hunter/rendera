@@ -161,8 +161,11 @@ export class WebGpuScene {
     this.message.set(message);
   }
 
-  /** Text at/under this em size (px) routes to MSDF; larger to analytic outlines. */
+  /** Text at/under this authoring em size (px) is prepared for MSDF; larger uses
+   * the analytic outline only. */
   private static readonly MSDF_MAX_PX = 48;
+  /** Em size the MSDF atlas bakes glyphs at (px). */
+  private static readonly MSDF_ATLAS_EM = 48;
 
   /**
    * Load the scene's fonts and prepare its text nodes for drawing. Small/plain
@@ -198,8 +201,16 @@ export class WebGpuScene {
         continue;
       }
       const useMsdf = text.fontSize <= WebGpuScene.MSDF_MAX_PX && !text.stroke;
+      // Always prepare the analytic outline: it's the fallback when an MSDF node
+      // is magnified past its atlas resolution (avoids MSDF's blow-up artifacts),
+      // and the only representation for large/stroked text.
+      const layout = layoutTextNode(font, text);
+      paths.set(node.id, layout.path);
+      if (!text.size) {
+        this.document.update(node.id, { size: vec2(layout.width, layout.height) });
+      }
       if (useMsdf) {
-        atlas ??= new MsdfAtlas(font, { emPx: 40, pxRange: 4 });
+        atlas ??= new MsdfAtlas(font, { emPx: WebGpuScene.MSDF_ATLAS_EM, pxRange: 4 });
         const laid = layoutTextNodeGlyphs(font, text);
         for (const g of laid.glyphs) {
           atlas.glyph(g.glyphId); // bake now (may grow the atlas)
@@ -209,15 +220,6 @@ export class WebGpuScene {
           glyphs: laid.glyphs.map((g) => ({ originX: g.originX, originY: g.originY, glyphId: g.glyphId })),
           fontSize: text.fontSize,
         });
-        if (!text.size) {
-          this.document.update(node.id, { size: vec2(laid.width, laid.height) });
-        }
-      } else {
-        const layout = layoutTextNode(font, text);
-        paths.set(node.id, layout.path);
-        if (!text.size) {
-          this.document.update(node.id, { size: vec2(layout.width, layout.height) });
-        }
       }
     }
     this.textPaths = paths;
@@ -238,6 +240,7 @@ export class WebGpuScene {
           atlasWidth: tex.width,
           atlasHeight: tex.height,
           pxRange: atlas.pxRange,
+          atlasEmPx: atlas.emPx,
         });
       }
       this.textMsdf = msdf;

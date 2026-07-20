@@ -669,6 +669,7 @@ describe('WebGpuRenderer colour pipeline', () => {
       atlasWidth: tex.width,
       atlasHeight: tex.height,
       pxRange: atlas.pxRange,
+      atlasEmPx: atlas.emPx,
     };
     renderer.setRenderList(buildRenderList(doc, createCamera(), { textMsdf: new Map([[node.id, msdf]]) }));
     const rb = await renderer.readback();

@@ -136,6 +136,9 @@ export interface MsdfNodeLayout {
   readonly atlasWidth: number;
   readonly atlasHeight: number;
   readonly pxRange: number;
+  /** Em size (px) the glyphs were baked at in the atlas — used to route to the
+   * analytic outline once the glyph is magnified well beyond it. */
+  readonly atlasEmPx: number;
 }
 
 /** Begin an isolated group: draws until the matching pop target a fresh layer. */
@@ -490,10 +493,19 @@ export function buildRenderList(
     if (node.type === 'text') {
       const text = node as TextNode;
       const screenMat = compose(worldToScreen, doc.getWorldMatrix(id));
+      const localPath = options.textPaths?.get(id);
+      const hasAnalytic = !!localPath && localPath.subpaths.length > 0;
 
-      // MSDF (small/dense text) takes precedence over the analytic outline path.
+      // Route by on-screen size. MSDF is fast and flawless while the glyph is
+      // rendered at up to ~2x its atlas resolution; magnified beyond that its
+      // fixed-resolution field shows clash/hook artifacts, so fall back to the
+      // exact analytic outline (resolution-independent) when it's available.
       const msdf = options.textMsdf?.get(id);
-      if (msdf) {
+      const det = screenMat.a * screenMat.d - screenMat.b * screenMat.c;
+      const screenScale = Math.sqrt(Math.abs(det)) || 1;
+      const zoomedPastMsdf = msdf ? msdf.fontSize * screenScale > msdf.atlasEmPx * 2 : false;
+
+      if (msdf && !(zoomedPastMsdf && hasAnalytic)) {
         let color = DEFAULT_FILL;
         if (text.fill) {
           color = text.fill.type === 'solid' ? text.fill.color : text.fill.stops[0]?.color ?? DEFAULT_FILL;
@@ -525,9 +537,9 @@ export function buildRenderList(
         return;
       }
 
-      // The shaped, local-space glyph outlines are supplied out-of-band (async
-      // shaping). No layout yet -> nothing to draw.
-      const localPath = options.textPaths?.get(id);
+      // Analytic outline path (used when magnified past MSDF, or as the only
+      // representation for large/stroked text). Shaping is async, so a node with
+      // no layout yet simply emits nothing.
       if (localPath && localPath.subpaths.length > 0) {
         emitVector(id, localPath, text.fill, text.stroke, text.fillRule ?? 'nonzero', screenMat, opacity, blend);
       }

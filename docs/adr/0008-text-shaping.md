@@ -84,12 +84,16 @@ vector fill.**
   renderer uploads the atlas and draws glyphs as instanced quads with a
   `median(rgb)` + `screenPxRange` (via `fwidth`) sampling shader — resolution-
   independent AA, premultiplied, composited like any leaf. `buildRenderList`
-  **routes** per node: small/plain text → MSDF (one bake per unique glyph),
-  large/stroked/display text → the analytic outline path (§ above). MSDF
-  correctness is proven by reconstructing coverage from the field and matching
-  the analytic fill (>97% away from the AA band). Deferred: msdfgen's optional
-  error-correction pass (rare corner speckle), a worker for baking, multi-font
-  atlases.
+  **routes by on-screen size**: a glyph uses MSDF while it renders at up to ~2×
+  its atlas em (fast, and where MSDF is flawless), and switches to the exact
+  analytic outline once magnified beyond that — MSDF's field is fixed-resolution,
+  so stretching it far past its baked size shows clash/hook artifacts at sharp
+  features that the resolution-independent outline avoids. Small/dense text stays
+  cheap; deep zoom stays crisp. Stroked/large display text always uses the
+  outline. MSDF correctness is proven by reconstructing coverage from the field
+  and matching the analytic fill (>97% away from the AA band). Deferred:
+  msdfgen's error-correction pass (would extend MSDF's usable magnification), a
+  worker for baking, multi-font atlases.
 - Licensing: HarfBuzz (Old MIT), `bidi-js`/`unicode-properties` (MIT), and the
   bundled Crimson Pro (OFL-1.1) are all safe to redistribute; recorded in
   `THIRD-PARTY-NOTICES.md`.
