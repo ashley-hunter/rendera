@@ -485,8 +485,12 @@ fn hueRotate(c : vec3f, a : f32) -> vec3f {
 }
 `;
 
-/** Cap on blur taps per axis (bounds cost for very large radii / deep zoom). */
-const MAX_BLUR_TAPS = 128;
+/**
+ * Cap on blur taps per axis. Past this, the sample stride widens instead of the
+ * tap count, so blur cost is constant regardless of the on-screen radius (a
+ * zoomed-in blur no longer explodes into hundreds of taps per pixel).
+ */
+const BLUR_TAP_CAP = 48;
 
 /** Pack a colour adjustment into a shader mode + [p0..p4] (see ADJUST_SHADER). */
 function adjustParams(
@@ -2053,15 +2057,23 @@ export class WebGpuRenderer {
 
     // Blur `src` (screen-space radius) along both axes; consumes `src`, returns
     // a fresh target (or `src` unchanged when the radius rounds to nothing).
+    //
+    // The tap count is capped: past the cap the sample STEP widens (stride > 1)
+    // instead of adding taps, so cost stays constant as the on-screen radius
+    // grows with zoom. The physical sigma/extent are preserved (each tap is
+    // `stride` device px, sigma is in sample units), and a wide Gaussian is
+    // smooth enough that sparse sampling is indistinguishable. Small radii keep
+    // stride 1 — pixel-exact, identical to a dense kernel.
     const blur2 = (src: GPUTexture, screenRadius: number): GPUTexture => {
       const rDev = screenRadius * this.sampleScale;
-      const taps = Math.min(MAX_BLUR_TAPS, Math.ceil(rDev));
-      if (taps < 1) return src;
-      const sigma = Math.max(rDev / 3, 0.5);
+      if (rDev < 0.5) return src;
+      const stride = Math.max(1, Math.ceil(rDev / BLUR_TAP_CAP));
+      const taps = Math.max(1, Math.min(BLUR_TAP_CAP, Math.ceil(rDev / stride)));
+      const sigma = Math.max(rDev / stride / 3, 0.5); // in sample (stride-step) units
       const h = this.acquireTarget();
-      this.blurPass(encoder, h, src, sigma, taps, 1, 0, blurSlot++);
+      this.blurPass(encoder, h, src, sigma, taps, stride, 0, blurSlot++);
       const v = this.acquireTarget();
-      this.blurPass(encoder, v, h, sigma, taps, 0, 1, blurSlot++);
+      this.blurPass(encoder, v, h, sigma, taps, 0, stride, blurSlot++);
       this.releaseTarget(h);
       this.releaseTarget(src);
       return v;
