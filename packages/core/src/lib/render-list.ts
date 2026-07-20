@@ -164,6 +164,34 @@ export type RenderCommand =
 /** The fill used for a layer that has none set (opaque mid-grey). */
 const DEFAULT_FILL: LinearRgba = { r: 0.5, g: 0.5, b: 0.5, a: 1 };
 
+/**
+ * Cache of resolved boolean-node paths, keyed by document then node id. Boolean
+ * ops are geometric and expensive; recomputing them every frame while only the
+ * camera moves (pan/zoom) would be very slow, so they're keyed by a cheap
+ * content signature of the operands and reused until that changes.
+ */
+const booleanResultCache = new WeakMap<SceneDocument, Map<NodeId, { sig: string; path: Path | null }>>();
+
+/** A cheap content checksum of a path (changes when any point moves). */
+function pathChecksum(p: Path): number {
+  let s = 0;
+  let n = 1;
+  for (const sp of p.subpaths) {
+    s += sp.start.x * 31.1 + sp.start.y * 17.7;
+    n++;
+    for (const seg of sp.segments) {
+      n++;
+      s += seg.to.x * 13.3 + seg.to.y * 7.7;
+      if (seg.type === 'quad') {
+        s += seg.control.x * 3.1 + seg.control.y * 5.3;
+      } else if (seg.type === 'cubic') {
+        s += seg.c1.x * 1.7 + seg.c1.y * 2.9 + seg.c2.x * 3.7 + seg.c2.y * 4.3;
+      }
+    }
+  }
+  return s + n * 1000003;
+}
+
 /** Options for `buildRenderList`. */
 export interface BuildRenderListOptions {
   /**
@@ -190,10 +218,36 @@ export function buildRenderList(
   const commands: RenderCommand[] = [];
   const worldToScreen = worldToScreenMatrix(camera);
 
+  let boolCache = booleanResultCache.get(doc);
+  if (!boolCache) {
+    boolCache = new Map();
+    booleanResultCache.set(doc, boolCache);
+  }
+
+  /** A content signature of a shape/boolean subtree (for cache invalidation). */
+  const shapeSig = (nid: NodeId): string => {
+    const n = doc.get(nid) as SpatialNode | undefined;
+    if (!n || n.visible === false) {
+      return 'x';
+    }
+    if (n.type === 'path') {
+      return 'p' + pathChecksum((n as PathNode).path).toFixed(2);
+    }
+    if (n.type === 'boolean') {
+      const parts = doc.getChildren(nid).map((c) => {
+        const m = doc.getLocalMatrix(c);
+        return `${shapeSig(c.id)}@${m.a},${m.b},${m.c},${m.d},${m.e},${m.f}`;
+      });
+      return `b${(n as BooleanNode).op}(${parts.join('|')})`;
+    }
+    return 'x';
+  };
+
   /**
    * Resolve a path or (nested) boolean node to a single exact-curve path in that
    * node's OWN local space. Operands of a boolean are each brought into the
    * boolean's space via their local matrix, then folded left-to-right by its op.
+   * Boolean results are cached by content signature (see `booleanResultCache`).
    */
   const resolveShape = (nid: NodeId): Path | null => {
     const n = doc.get(nid) as SpatialNode | undefined;
@@ -204,6 +258,11 @@ export function buildRenderList(
       return (n as PathNode).path;
     }
     if (n.type === 'boolean') {
+      const sig = shapeSig(nid);
+      const cached = boolCache.get(nid);
+      if (cached && cached.sig === sig) {
+        return cached.path;
+      }
       const op = (n as BooleanNode).op;
       const parts: Path[] = [];
       for (const child of doc.getChildren(nid)) {
@@ -212,13 +271,14 @@ export function buildRenderList(
           parts.push(transformPath(shape, doc.getLocalMatrix(child)));
         }
       }
-      if (parts.length === 0) {
-        return null;
+      let result: Path | null = null;
+      if (parts.length > 0) {
+        result = parts[0];
+        for (let i = 1; i < parts.length; i++) {
+          result = booleanPath(result, parts[i], op);
+        }
       }
-      let result = parts[0];
-      for (let i = 1; i < parts.length; i++) {
-        result = booleanPath(result, parts[i], op);
-      }
+      boolCache.set(nid, { sig, path: result });
       return result;
     }
     return null;
