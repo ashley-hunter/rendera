@@ -74,3 +74,11 @@ raw fill exactly while the 'e' crossbar seam's deep-interior stroke coverage
 drops from ~128 sample hits to 0, and an end-to-end GPU readback of a stroked
 'e' finds zero stroke pixels among 700+ deep-interior fill pixels (42 before the
 fix). Resolution is content-keyed cached in `prepareGeom`, ~sub-20ms per glyph.
+
+The split/merge tolerances here are absolute (path units), tuned for ~1000-unit
+font coordinates. `resolveOverlaps` therefore **normalizes to a ~1000-unit
+working scale** and maps the result back: em-scaled text (~40 units) would
+otherwise shatter a glyph into dozens of fragments — stroking those fragments
+drew a chaotic mess across the letters — and a very large path would miss
+intersections. A scale-invariance test asserts identical topology and fill for a
+glyph at 0.04×, 1×, and 25×.

@@ -19,7 +19,7 @@
  * overlaps are a known limitation. Pure and DOM-free.
  */
 
-import { pointInPath, type Path, type PathSegment, type SubPath } from './path';
+import { pointInPath, transformPath, type Path, type PathSegment, type SubPath } from './path';
 import { add, distance, lerp, scale, subtract, vec2, type Vec2 } from './vec2';
 
 /** A boolean operation over two paths. */
@@ -280,8 +280,25 @@ export function booleanPath(a: Path, b: Path, op: BooleanOp): Path {
  * Nonzero fill hides the overlap, but *stroking* the raw contour inks those
  * interior seams as spurious lines inside the letter. Stroking the resolved
  * outline instead traces only the visible edge, matching Illustrator/Photoshop.
+ *
+ * The intersection/merge tolerances are absolute (path units), so the work is
+ * done at a normalized ~1000-unit scale and mapped back — otherwise a small path
+ * (e.g. em-scaled text at ~40 units) would shatter into fragments, and a huge one
+ * would miss intersections.
  */
 export function resolveOverlaps(path: Path): Path {
+  const b = pathBoundsLocal(path);
+  if (!b) return path;
+  const diag = Math.hypot(b.maxX - b.minX, b.maxY - b.minY);
+  if (diag < 1e-9) return path;
+  const k = 1000 / diag;
+  if (Math.abs(k - 1) < 0.05) return resolveOverlapsCore(path);
+  const scaled = transformPath(path, { a: k, b: 0, c: 0, d: k, e: 0, f: 0 });
+  const out = resolveOverlapsCore(scaled);
+  return transformPath(out, { a: 1 / k, b: 0, c: 0, d: 1 / k, e: 0, f: 0 });
+}
+
+function resolveOverlapsCore(path: Path): Path {
   const contours = pathToContours(path);
   if (contours.length === 0) return path;
 
