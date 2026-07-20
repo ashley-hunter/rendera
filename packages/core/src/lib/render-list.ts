@@ -90,6 +90,14 @@ export interface DrawPathCommand {
   readonly edges: readonly PathEdge[];
   /** Screen-space bounding box of the geometry. */
   readonly bounds: Bounds;
+  /**
+   * When true, interior pixels are fully covered — only the true outer/inner
+   * boundary gets the analytic AA rim, not internal edges. Set for stroke
+   * outlines, which are self-overlapping unions of segment quads + joins; the
+   * plain distance-to-nearest-edge rim would otherwise "bead" along every
+   * internal seam at high zoom.
+   */
+  readonly hardInterior?: boolean;
 }
 
 /** One MSDF glyph quad: a unit-square→screen transform + its atlas UV rect. */
@@ -254,16 +262,20 @@ export function buildRenderList(
     }
 
     if (stroke) {
-      const det = screenMat.a * screenMat.d - screenMat.b * screenMat.c;
-      const scaleFactor = Math.sqrt(Math.abs(det)) || 1;
-      const outline = strokePath(screenPath, {
-        width: stroke.width * scaleFactor,
+      // Stroke in LOCAL space, then transform the outline to screen. The outline
+      // complexity is then bounded by the shape's own geometry, not its on-screen
+      // size — so a deep zoom no longer explodes the segment/join count (which was
+      // both a big perf sink and the source of beading along the stroke). Strokes
+      // also scale with the shape under non-uniform transforms, as expected.
+      const outline = strokePath(localPath, {
+        width: stroke.width,
         cap: stroke.cap,
         join: stroke.join,
         miterLimit: stroke.miterLimit,
       });
-      const bounds = pathBounds(outline);
-      const edges = pathEdges(outline);
+      const screenOutline = toQuadraticPath(transformPath(outline, screenMat), 0.1);
+      const bounds = pathBounds(screenOutline);
+      const edges = pathEdges(screenOutline);
       if (bounds && edges.length > 0) {
         commands.push({
           op: 'draw-path',
@@ -275,6 +287,7 @@ export function buildRenderList(
           blend,
           edges,
           bounds,
+          hardInterior: true,
         });
       }
     }

@@ -626,7 +626,10 @@ fn paintColor(p : vec2f) -> vec4f {
   var inside = winding != 0;
   if (pp.counts.x == 1u) { inside = (winding & 1) != 0; }
   let signed = select(dist, -dist, inside);
-  let coverage = clamp(0.5 - signed, 0.0, 1.0); // ~1 device-px analytic rim
+  var coverage = clamp(0.5 - signed, 0.0, 1.0); // ~1 device-px analytic rim
+  // Self-overlapping fills (stroke outlines): keep the interior solid so the AA
+  // rim appears only at the true outer/inner boundary, not internal seams.
+  if (pp.misc.w > 0.5 && inside) { coverage = 1.0; }
   let paint = paintColor(p);
   let alpha = paint.a * pp.misc.x * coverage;
   return vec4f(paint.rgb * alpha, alpha); // premultiplied linear
@@ -1394,10 +1397,11 @@ export class WebGpuRenderer {
       u32[o + 9] = rec.bandTableOffset;
       u32[o + 10] = rec.bandCount;
       u32[o + 11] = paintKind(cmd.paint);
-      // misc = (opacity, bandMinY, bandH, _)
+      // misc = (opacity, bandMinY, bandH, hardInterior)
       f32[o + 12] = cmd.opacity;
       f32[o + 13] = rec.bandMinY;
       f32[o + 14] = rec.bandH;
+      f32[o + 15] = cmd.hardInterior ? 1 : 0;
       this.packPaint(cmd.paint, cmd.screenToLocal, f32, u32, o, stopData);
       draw++;
     }
