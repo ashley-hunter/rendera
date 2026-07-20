@@ -210,6 +210,79 @@ export function layoutText(font: RenderaFont, text: string, options: TextOptions
   return { path: { subpaths }, width: blockWidth, height, lineCount: lines.length, ascent, lineHeight };
 }
 
+/** One glyph placed in the text's local space (origin at the glyph pen/baseline). */
+export interface PositionedGlyph {
+  readonly glyphId: number;
+  /** Pen x at the glyph origin (local px). */
+  readonly originX: number;
+  /** Baseline y at the glyph origin (local px, Y-down). */
+  readonly originY: number;
+}
+
+/** Positioned glyphs plus block metrics — the input to atlas (MSDF) rendering. */
+export interface GlyphLayout {
+  readonly glyphs: readonly PositionedGlyph[];
+  readonly width: number;
+  readonly height: number;
+  readonly lineCount: number;
+  readonly ascent: number;
+  readonly lineHeight: number;
+}
+
+/**
+ * Lay out `text` into positioned glyphs (no outline baking) — for atlas/MSDF
+ * rendering, where each glyph is drawn as a textured quad. Shares shaping,
+ * wrapping, alignment, and line stacking with `layoutText`.
+ */
+export function layoutTextGlyphs(font: RenderaFont, text: string, options: TextOptions): GlyphLayout {
+  const scale = options.fontSize / font.upem;
+  const letter = options.letterSpacing ?? 0;
+  const align = options.align ?? 'left';
+  const baseDir =
+    options.direction === 'ltr' ? 'ltr' : options.direction === 'rtl' ? 'rtl' : undefined;
+  const m = font.metrics;
+  const lineHeight = options.lineHeight ?? (m.ascender + m.descender + m.lineGap) * scale;
+  const ascent = m.ascender * scale;
+  const ctx: ShapeContext = { scale, letter, baseDir, language: options.language, features: options.features };
+
+  const wrap = options.maxWidth && options.maxWidth > 0 ? options.maxWidth : 0;
+  const rawLines = text.split('\n');
+  const lines = wrap ? rawLines.flatMap((p) => wrapParagraph(font, p, ctx, wrap)) : rawLines;
+  const perLine = lines.map((line) => shapeLine(font, line, ctx));
+  const blockWidth = wrap ? wrap : perLine.reduce((w, l) => Math.max(w, l.width), 0);
+
+  const glyphs: PositionedGlyph[] = [];
+  perLine.forEach((line, li) => {
+    const baseline = ascent + li * lineHeight;
+    const offset =
+      align === 'center'
+        ? (blockWidth - line.width) / 2
+        : align === 'right'
+          ? blockWidth - line.width
+          : 0;
+    for (const g of line.glyphs) {
+      glyphs.push({ glyphId: g.glyphId, originX: offset + g.x, originY: baseline - g.yOffset });
+    }
+  });
+  const height =
+    lines.length > 0 ? (lines.length - 1) * lineHeight + (m.ascender + m.descender) * scale : 0;
+  return { glyphs, width: blockWidth, height, lineCount: lines.length, ascent, lineHeight };
+}
+
+/** Lay out a `TextNode`'s positioned glyphs (for MSDF), mapping its style. */
+export function layoutTextNodeGlyphs(font: RenderaFont, node: TextNode): GlyphLayout {
+  return layoutTextGlyphs(font, node.text, {
+    fontSize: node.fontSize,
+    lineHeight: node.lineHeight,
+    letterSpacing: node.letterSpacing,
+    align: node.align,
+    direction: node.direction,
+    language: node.language,
+    features: node.features,
+    maxWidth: node.maxWidth,
+  });
+}
+
 /** Lay out a `TextNode` with a resolved font, mapping its style fields. */
 export function layoutTextNode(font: RenderaFont, node: TextNode): TextLayout {
   return layoutText(font, node.text, {

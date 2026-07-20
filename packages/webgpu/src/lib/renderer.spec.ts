@@ -5,6 +5,8 @@ import {
   createTransform,
   ellipsePath,
   layoutTextNode,
+  layoutTextNodeGlyphs,
+  MsdfAtlas,
   rectPath,
   RenderaFont,
   SceneDocument,
@@ -12,6 +14,7 @@ import {
   type GroupNode,
   type ImageNode,
   type LayerNode,
+  type MsdfNodeLayout,
   type PathNode,
   type TextNode,
 } from '@rendera/core';
@@ -625,6 +628,51 @@ describe('WebGpuRenderer colour pipeline', () => {
     const rb = await renderer.readback();
 
     // Glyph ink: white-ish coverage pixels present, background stays black.
+    let ink = 0;
+    for (let i = 0; i < rb.data.length; i += 4) {
+      if (rb.data[i] > 180 && rb.data[i + 1] > 180 && rb.data[i + 2] > 180) ink++;
+    }
+    expect(ink).toBeGreaterThan(30);
+    expect(Math.max(pixel(rb, 1, 1).r, pixel(rb, 1, 1).g, pixel(rb, 1, 1).b)).toBeLessThan(20);
+    renderer.destroy();
+  });
+
+  it('renders MSDF text from the glyph atlas (median/screenPxRange AA)', async () => {
+    const data = await fetch(fontUrl).then((r) => r.arrayBuffer());
+    const font = await RenderaFont.load(data);
+    const doc = SceneDocument.create({ idFactory: createSequentialIdFactory('n') });
+    const node = doc.insert<TextNode>({
+      type: 'text',
+      name: 't',
+      text: 'Ag',
+      fontId: 'crimson',
+      fontSize: 40,
+      fill: { type: 'solid', color: { r: 1, g: 1, b: 1, a: 1 } },
+      transform: createTransform({ translation: vec2(4, 4) }),
+    });
+
+    // Bake the node's glyphs into the atlas, then upload it to the renderer.
+    const atlas = new MsdfAtlas(font, { emPx: 40, pxRange: 4 });
+    const layout = layoutTextNodeGlyphs(font, node);
+    const glyphs = layout.glyphs
+      .map((g) => ({ originX: g.originX, originY: g.originY, cell: atlas.glyph(g.glyphId) }))
+      .filter((g): g is { originX: number; originY: number; cell: NonNullable<typeof g.cell> } => g.cell !== null);
+    expect(glyphs.length).toBeGreaterThan(0);
+    const tex = atlas.texture;
+
+    const renderer = await WebGpuRenderer.create(makeCanvas(64), { colorSpace: 'srgb', dither: false });
+    renderer.setClearColor({ r: 0, g: 0, b: 0, a: 1 });
+    renderer.setMsdfAtlas(tex.data, tex.width, tex.height);
+    const msdf: MsdfNodeLayout = {
+      glyphs,
+      fontSize: node.fontSize,
+      atlasWidth: tex.width,
+      atlasHeight: tex.height,
+      pxRange: atlas.pxRange,
+    };
+    renderer.setRenderList(buildRenderList(doc, createCamera(), { textMsdf: new Map([[node.id, msdf]]) }));
+    const rb = await renderer.readback();
+
     let ink = 0;
     for (let i = 0; i < rb.data.length; i += 4) {
       if (rb.data[i] > 180 && rb.data[i + 1] > 180 && rb.data[i + 2] > 180) ink++;

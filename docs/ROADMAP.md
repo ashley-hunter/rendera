@@ -134,8 +134,12 @@ so backend tests do **pixel readback** to assert colour correctness.
   GPOS/GSUB, bidi (UAX #9) + script itemization (UAX #24) — with glyph **outlines**
   fed through the analytic fill, so type is resolution-independent and paints with
   solid colour, gradients, and strokes like any vector. A `text` node + font
-  loading + layout live in DOM-free `@rendera/core` (wasm lazy-loaded). *(MSDF
-  atlas for dense small text, line wrapping, and colour glyphs are follow-ups.)*
+  loading + layout live in DOM-free `@rendera/core` (wasm lazy-loaded). Plus
+  greedy **line wrapping** (`maxWidth`, Intl.Segmenter breaks) and a **pure-TS
+  MSDF** path — an owned port of Chlumsky's algorithm (edge colouring + signed
+  pseudo-distance + median), skyline-packed atlas, `median`/`screenPxRange`
+  sampling shader, with size-based routing (MSDF small · analytic large).
+  *(Colour glyphs and vertical text are follow-ups.)*
 - ⬜ **Boolean ops** (union / intersect / difference on paths).
 
 ## Phase 6 — Effects & non-destructive stack  ⬜  → `@rendera/effects`

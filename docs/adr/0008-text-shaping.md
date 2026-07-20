@@ -67,8 +67,29 @@ vector fill.**
   `asyncWebAssembly`. Both verified.
 - Per-glyph analytic fills are O(glyphs) draw-paths; fine for headings/labels,
   and the motivation for the MSDF atlas follow-up on dense body text.
-- Deferred: line wrapping, vertical text, MSDF atlas, colour glyphs (the tiny
-  HarfBuzz build is monochrome-outline only), and richer per-run font fallback.
+- Deferred: vertical text, colour glyphs (the tiny HarfBuzz build is
+  monochrome-outline only), and richer per-run font fallback.
+
+## Follow-up: line wrapping + MSDF atlas
+
+- **Line wrapping.** `layoutText`/`TextNode` gained `maxWidth`: greedy word-wrap
+  at `Intl.Segmenter` break opportunities (regex fallback), break-word for
+  overlong tokens, aligned within the box, composing with the bidi per-line pass.
+- **MSDF atlas (perf path for small/dense text).** Rather than depend on an
+  Emscripten build of msdfgen (no toolchain) or an unauditable browser-only WASM
+  package, we **own a pure-TS port** of Chlumsky's MSDF algorithm (edge colouring
+  + per-channel signed *pseudo*-distance + median), reusing our exact line/
+  quadratic distance math. `generateGlyphMsdf` bakes a glyph; `MsdfAtlas`
+  skyline-packs baked cells into a growing RGBA8 texture and caches them. The
+  renderer uploads the atlas and draws glyphs as instanced quads with a
+  `median(rgb)` + `screenPxRange` (via `fwidth`) sampling shader — resolution-
+  independent AA, premultiplied, composited like any leaf. `buildRenderList`
+  **routes** per node: small/plain text → MSDF (one bake per unique glyph),
+  large/stroked/display text → the analytic outline path (§ above). MSDF
+  correctness is proven by reconstructing coverage from the field and matching
+  the analytic fill (>97% away from the AA band). Deferred: msdfgen's optional
+  error-correction pass (rare corner speckle), a worker for baking, multi-font
+  atlases.
 - Licensing: HarfBuzz (Old MIT), `bidi-js`/`unicode-properties` (MIT), and the
   bundled Crimson Pro (OFL-1.1) are all safe to redistribute; recorded in
   `THIRD-PARTY-NOTICES.md`.

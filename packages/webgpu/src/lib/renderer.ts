@@ -53,6 +53,13 @@ interface PathResources {
   viewportBindGroup: GPUBindGroup;
 }
 
+/** GPU resources for the MSDF text pipeline. */
+interface MsdfResources {
+  pipeline: GPURenderPipeline;
+  texLayout: GPUBindGroupLayout;
+  sampler: GPUSampler;
+}
+
 /** Per-path-draw packing: its params slot and row-band table location. */
 interface PathDraw {
   slot: number;
@@ -626,8 +633,60 @@ fn paintColor(p : vec2f) -> vec4f {
 }
 `;
 
+// MSDF text: instanced glyph quads sampling the multi-channel distance-field
+// atlas. median(r,g,b) reconstructs the true signed distance (0.5 = edge);
+// screenPxRange (derived from the baked atlas pxRange and the on-screen texel
+// density via fwidth) converts it to a ~1px analytic anti-aliased coverage at
+// any scale. Output is premultiplied linear for the `over` blend.
+const MSDF_SHADER = /* wgsl */ `
+struct Viewport { size : vec2f, scale : f32, _pad : f32 };
+@group(0) @binding(0) var<uniform> vp : Viewport;
+@group(1) @binding(0) var atlasTex : texture_2d<f32>;
+@group(1) @binding(1) var atlasSamp : sampler;
+
+struct VOut {
+  @builtin(position) pos : vec4f,
+  @location(0) uv : vec2f,
+  @location(1) color : vec4f,
+  @location(2) pxRange : f32,
+};
+
+@vertex fn vs(
+  @location(0) corner : vec2f,
+  @location(1) m0 : vec2f,
+  @location(2) m1 : vec2f,
+  @location(3) m2 : vec2f,
+  @location(4) uvRect : vec4f,
+  @location(5) color : vec4f,
+  @location(6) pxRange : f32
+) -> VOut {
+  let screen = m0 * corner.x + m1 * corner.y + m2;
+  let clip = vec2f(screen.x / vp.size.x * 2.0 - 1.0, 1.0 - screen.y / vp.size.y * 2.0);
+  var out : VOut;
+  out.pos = vec4f(clip, 0.0, 1.0);
+  out.uv = mix(uvRect.xy, uvRect.zw, corner);
+  out.color = color;
+  out.pxRange = pxRange;
+  return out;
+}
+
+fn median3(v : vec3f) -> f32 { return max(min(v.r, v.g), min(max(v.r, v.g), v.b)); }
+
+@fragment fn fs(@location(0) uv : vec2f, @location(1) color : vec4f, @location(2) pxRange : f32) -> @location(0) vec4f {
+  let sd = median3(textureSample(atlasTex, atlasSamp, uv).rgb);
+  let texSize = vec2f(textureDimensions(atlasTex, 0));
+  let unitRange = vec2f(pxRange) / texSize;               // range in texture units
+  let screenTexSize = vec2f(1.0) / fwidth(uv);            // texels per screen px
+  let screenPxRange = max(0.5 * dot(unitRange, screenTexSize), 1.0);
+  let coverage = clamp(screenPxRange * (sd - 0.5) + 0.5, 0.0, 1.0);
+  let a = coverage * color.a;
+  return vec4f(color.rgb * a, a); // premultiplied linear
+}
+`;
+
 const SCENE_FORMAT: GPUTextureFormat = 'rgba16float';
 const IMAGE_FORMAT: GPUTextureFormat = 'rgba8unorm-srgb';
+const MSDF_FORMAT: GPUTextureFormat = 'rgba8unorm';
 
 export class WebGpuRenderer {
   private background: RendererColor = { r: 0, g: 0, b: 0, a: 1 };
@@ -648,6 +707,12 @@ export class WebGpuRenderer {
   /** Per-draw-image instance data (8 floats: transform + opacity). */
   private imageBuffer: GPUBuffer | null = null;
   private imageDrawCount = 0;
+  /** Per-glyph MSDF instance data (16 floats: transform + uv + colour + pxRange). */
+  private msdfBuffer: GPUBuffer | null = null;
+  /** Per-draw-msdf instance range (first instance + count), in command order. */
+  private msdfDraws: { first: number; count: number }[] = [];
+  /** The uploaded MSDF glyph atlas, if any. */
+  private msdfAtlas: { texture: GPUTexture; bindGroup: GPUBindGroup } | null = null;
   /** Uniform slots (256B each) for per-op blend params. */
   private blendParamsBuffer: GPUBuffer;
   private blendParamsSlots = 0;
@@ -684,6 +749,7 @@ export class WebGpuRenderer {
     private readonly image: ImageResources,
     private readonly compositor: CompositorResources,
     private readonly pathResources: PathResources,
+    private readonly msdf: MsdfResources,
     width: number,
     height: number,
     supersample: number
@@ -989,6 +1055,62 @@ export class WebGpuRenderer {
       viewportBindGroup: pathViewportBindGroup,
     };
 
+    // --- MSDF text pipeline (glyph quads sampling the distance-field atlas) ---
+    const msdfModule = device.createShaderModule({ code: MSDF_SHADER });
+    const msdfTexLayout = device.createBindGroupLayout({
+      entries: [
+        { binding: 0, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'float' } },
+        { binding: 1, visibility: GPUShaderStage.FRAGMENT, sampler: { type: 'filtering' } },
+      ],
+    });
+    const msdfPipeline = device.createRenderPipeline({
+      layout: device.createPipelineLayout({ bindGroupLayouts: [quadLayout, msdfTexLayout] }),
+      vertex: {
+        module: msdfModule,
+        entryPoint: 'vs',
+        buffers: [
+          { arrayStride: 8, stepMode: 'vertex', attributes: [{ shaderLocation: 0, offset: 0, format: 'float32x2' }] },
+          {
+            arrayStride: 64,
+            stepMode: 'instance',
+            attributes: [
+              { shaderLocation: 1, offset: 0, format: 'float32x2' },
+              { shaderLocation: 2, offset: 8, format: 'float32x2' },
+              { shaderLocation: 3, offset: 16, format: 'float32x2' },
+              { shaderLocation: 4, offset: 24, format: 'float32x4' },
+              { shaderLocation: 5, offset: 40, format: 'float32x4' },
+              { shaderLocation: 6, offset: 56, format: 'float32' },
+            ],
+          },
+        ],
+      },
+      fragment: {
+        module: msdfModule,
+        entryPoint: 'fs',
+        targets: [
+          {
+            format: SCENE_FORMAT,
+            blend: {
+              color: { srcFactor: 'one', dstFactor: 'one-minus-src-alpha', operation: 'add' },
+              alpha: { srcFactor: 'one', dstFactor: 'one-minus-src-alpha', operation: 'add' },
+            },
+          },
+        ],
+      },
+      primitive: { topology: 'triangle-strip' },
+    });
+    const msdfSampler = device.createSampler({
+      magFilter: 'linear',
+      minFilter: 'linear',
+      addressModeU: 'clamp-to-edge',
+      addressModeV: 'clamp-to-edge',
+    });
+    const msdfResources: MsdfResources = {
+      pipeline: msdfPipeline,
+      texLayout: msdfTexLayout,
+      sampler: msdfSampler,
+    };
+
     const width = Math.max(1, canvas.width || 1);
     const height = Math.max(1, canvas.height || 1);
 
@@ -1008,6 +1130,7 @@ export class WebGpuRenderer {
       imageResources,
       compositorResources,
       pathResources,
+      msdfResources,
       width,
       height,
       options.supersample ?? 2
@@ -1066,6 +1189,34 @@ export class WebGpuRenderer {
     this.imageCache.delete(assetId);
   }
 
+  /**
+   * Upload (or replace) the MSDF glyph atlas that text nodes sample. The image
+   * is a tightly-packed RGBA8 field (`MsdfAtlas.texture`); call again after a
+   * grow (its `version` changed).
+   */
+  setMsdfAtlas(data: Uint8ClampedArray, width: number, height: number): void {
+    this.msdfAtlas?.texture.destroy();
+    const texture = this.device.createTexture({
+      size: [width, height],
+      format: MSDF_FORMAT,
+      usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST,
+    });
+    this.device.queue.writeTexture(
+      { texture },
+      data,
+      { bytesPerRow: width * 4, rowsPerImage: height },
+      [width, height]
+    );
+    const bindGroup = this.device.createBindGroup({
+      layout: this.msdf.texLayout,
+      entries: [
+        { binding: 0, resource: texture.createView() },
+        { binding: 1, resource: this.msdf.sampler },
+      ],
+    });
+    this.msdfAtlas = { texture, bindGroup };
+  }
+
   /** Fill levels 1..n by repeatedly box-downsampling the previous level. */
   private generateMips(texture: GPUTexture, levels: number): void {
     const encoder = this.device.createCommandEncoder();
@@ -1112,9 +1263,11 @@ export class WebGpuRenderer {
     const solids: number[] = [];
     const images: number[] = [];
     const edges: number[] = [];
+    const msdf: number[] = []; // 16 floats/instance: transform + uv + colour + pxRange
     const bandTable: number[] = []; // (indexOffset, count) pairs
     const edgeIndex: number[] = []; // global edge indices, grouped by band
     this.pathDraws = [];
+    this.msdfDraws = [];
     const bandHeight = 8; // device px per horizontal band
     const pad = 2; // AA margin, matching the vertex bbox pad
     let blendOps = 0;
@@ -1162,6 +1315,20 @@ export class WebGpuRenderer {
           bandH: bandHeight,
         });
         if (cmd.blend !== 'normal') blendOps++;
+      } else if (cmd.op === 'draw-msdf') {
+        const first = msdf.length / 16;
+        for (const q of cmd.quads) {
+          const m = q.transform;
+          const a = cmd.color.a * cmd.opacity; // bake opacity into alpha
+          msdf.push(
+            m.a, m.b, m.c, m.d, m.e, m.f,
+            q.uv[0], q.uv[1], q.uv[2], q.uv[3],
+            cmd.color.r, cmd.color.g, cmd.color.b, a,
+            cmd.pxRange, 0
+          );
+        }
+        this.msdfDraws.push({ first, count: cmd.quads.length });
+        if (cmd.blend !== 'normal') blendOps++;
       } else if (cmd.op === 'push-group') {
         blendOps++; // the matching pop composites the group (one blend pass)
       }
@@ -1178,6 +1345,11 @@ export class WebGpuRenderer {
       const data = new Float32Array(images);
       this.imageBuffer = this.ensureVertexBuffer(this.imageBuffer, data.byteLength, 'image');
       this.device.queue.writeBuffer(this.imageBuffer, 0, data);
+    }
+    if (msdf.length > 0) {
+      const data = new Float32Array(msdf);
+      this.msdfBuffer = this.ensureVertexBuffer(this.msdfBuffer, data.byteLength, 'msdf');
+      this.device.queue.writeBuffer(this.msdfBuffer, 0, data);
     }
     if (edges.length > 0) {
       const edgeData = new Float32Array(edges);
@@ -1407,6 +1579,8 @@ export class WebGpuRenderer {
     this.gradStopsBuffer?.destroy();
     this.solidBuffer?.destroy();
     this.imageBuffer?.destroy();
+    this.msdfBuffer?.destroy();
+    this.msdfAtlas?.texture.destroy();
     this.destroyTargetPool();
     for (const { texture } of this.imageCache.values()) {
       texture.destroy();
@@ -1435,6 +1609,7 @@ export class WebGpuRenderer {
     let solidCursor = 0;
     let imageCursor = 0;
     let pathCursor = 0;
+    let msdfCursor = 0;
     let blendSlot = 0;
 
     // Consecutive Normal draws onto the same target share ONE render pass, so
@@ -1486,8 +1661,15 @@ export class WebGpuRenderer {
         continue;
       }
 
-      // A leaf draw (solid, image, or vector path).
-      const index = cmd.op === 'draw-solid' ? solidCursor : cmd.op === 'draw-image' ? imageCursor : pathCursor;
+      // A leaf draw (solid, image, vector path, or MSDF text).
+      const index =
+        cmd.op === 'draw-solid'
+          ? solidCursor
+          : cmd.op === 'draw-image'
+            ? imageCursor
+            : cmd.op === 'draw-msdf'
+              ? msdfCursor
+              : pathCursor;
       if (cmd.blend === 'normal') {
         this.drawLeafInto(passFor(top.tex), cmd, index);
       } else {
@@ -1509,6 +1691,8 @@ export class WebGpuRenderer {
         solidCursor++;
       } else if (cmd.op === 'draw-image') {
         imageCursor++;
+      } else if (cmd.op === 'draw-msdf') {
+        msdfCursor++;
       } else {
         pathCursor++;
       }
@@ -1531,6 +1715,19 @@ export class WebGpuRenderer {
       pass.setVertexBuffer(0, this.unitQuadBuffer);
       pass.setVertexBuffer(1, this.imageBuffer);
       pass.draw(4, 1, 0, index);
+      return;
+    }
+    if (cmd.op === 'draw-msdf') {
+      const range = this.msdfDraws[index];
+      if (!this.msdfBuffer || !this.msdfAtlas || !range || range.count === 0) {
+        return; // atlas not uploaded, or nothing to draw
+      }
+      pass.setPipeline(this.msdf.pipeline);
+      pass.setBindGroup(0, this.quadBindGroup);
+      pass.setBindGroup(1, this.msdfAtlas.bindGroup);
+      pass.setVertexBuffer(0, this.unitQuadBuffer);
+      pass.setVertexBuffer(1, this.msdfBuffer);
+      pass.draw(4, range.count, 0, range.first);
       return;
     }
     if (cmd.op === 'draw-path') {

@@ -57,9 +57,11 @@ export const Gradients: Story = {
 
 /**
  * High-fidelity text: real HarfBuzz shaping (ligatures like fi/ffl, kerning like
- * AV/To) with glyph outlines fed through the analytic vector fill — so type is
- * resolution-independent (zoom in, it stays razor sharp) and paints with solid
- * colour, gradients, and strokes like any other vector shape.
+ * AV/To) with glyph outlines. Large/display type (the headline, "Vector Type")
+ * renders through the analytic vector fill — resolution-independent, paints with
+ * gradients + strokes like any vector. Small/body text (subtitle, ligature/
+ * kerning lines, the wrapped paragraph) auto-routes to a pure-TS MSDF atlas
+ * (median + screenPxRange AA), cached per glyph. Zoom in: both stay sharp.
  */
 export const Text: Story = {
   args: { scene: createTextScene() },

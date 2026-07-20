@@ -91,6 +91,44 @@ export interface DrawPathCommand {
   readonly bounds: Bounds;
 }
 
+/** One MSDF glyph quad: a unit-square→screen transform + its atlas UV rect. */
+export interface MsdfQuad {
+  readonly transform: Mat2D;
+  /** Atlas UV rect (u0, v0, u1, v1), 0..1. */
+  readonly uv: readonly [number, number, number, number];
+}
+
+/** Paint text as MSDF glyph quads sampled from the atlas texture. */
+export interface DrawMsdfCommand {
+  readonly op: 'draw-msdf';
+  readonly nodeId: NodeId;
+  /** Resolved linear-light text colour. */
+  readonly color: LinearRgba;
+  readonly opacity: number;
+  readonly blend: BlendMode;
+  /** Distance range (spread) in atlas px — the sampler's AA scale. */
+  readonly pxRange: number;
+  readonly quads: readonly MsdfQuad[];
+}
+
+/** A glyph's atlas placement (structurally an `AtlasGlyph`). */
+export interface MsdfCell {
+  readonly x: number;
+  readonly y: number;
+  readonly w: number;
+  readonly h: number;
+  readonly plane: { readonly left: number; readonly right: number; readonly top: number; readonly bottom: number };
+}
+
+/** Pre-baked MSDF layout for a text node (positioned glyphs + atlas info). */
+export interface MsdfNodeLayout {
+  readonly glyphs: readonly { readonly originX: number; readonly originY: number; readonly cell: MsdfCell }[];
+  readonly fontSize: number;
+  readonly atlasWidth: number;
+  readonly atlasHeight: number;
+  readonly pxRange: number;
+}
+
 /** Begin an isolated group: draws until the matching pop target a fresh layer. */
 export interface PushGroupCommand {
   readonly op: 'push-group';
@@ -110,6 +148,7 @@ export type RenderCommand =
   | DrawSolidCommand
   | DrawImageCommand
   | DrawPathCommand
+  | DrawMsdfCommand
   | PushGroupCommand
   | PopGroupCommand;
 
@@ -125,6 +164,12 @@ export interface BuildRenderListOptions {
    * out).
    */
   readonly textPaths?: ReadonlyMap<NodeId, Path>;
+  /**
+   * Pre-baked MSDF layouts per text node. Takes precedence over `textPaths`
+   * (the caller routes small/dense text to MSDF, large/display text to the
+   * analytic outline path).
+   */
+  readonly textMsdf?: ReadonlyMap<NodeId, MsdfNodeLayout>;
 }
 
 /** Flatten the drawable nodes of `doc` into a compositing command stream. */
@@ -234,11 +279,46 @@ export function buildRenderList(
 
     if (node.type === 'text') {
       const text = node as TextNode;
+      const screenMat = compose(worldToScreen, doc.getWorldMatrix(id));
+
+      // MSDF (small/dense text) takes precedence over the analytic outline path.
+      const msdf = options.textMsdf?.get(id);
+      if (msdf) {
+        let color = DEFAULT_FILL;
+        if (text.fill) {
+          color = text.fill.type === 'solid' ? text.fill.color : text.fill.stops[0]?.color ?? DEFAULT_FILL;
+        }
+        const quads: MsdfQuad[] = [];
+        for (const g of msdf.glyphs) {
+          const left = g.originX + g.cell.plane.left * msdf.fontSize;
+          const right = g.originX + g.cell.plane.right * msdf.fontSize;
+          // plane bounds are em, Y-up; local space is Y-down (baseline at originY).
+          const top = g.originY - g.cell.plane.top * msdf.fontSize;
+          const bottom = g.originY - g.cell.plane.bottom * msdf.fontSize;
+          const localFromUnit = compose(
+            fromTranslation(vec2(left, top)),
+            fromScaling(vec2(right - left, bottom - top))
+          );
+          quads.push({
+            transform: compose(screenMat, localFromUnit),
+            uv: [
+              g.cell.x / msdf.atlasWidth,
+              g.cell.y / msdf.atlasHeight,
+              (g.cell.x + g.cell.w) / msdf.atlasWidth,
+              (g.cell.y + g.cell.h) / msdf.atlasHeight,
+            ],
+          });
+        }
+        if (quads.length > 0) {
+          commands.push({ op: 'draw-msdf', nodeId: id, color, opacity, blend, pxRange: msdf.pxRange, quads });
+        }
+        return;
+      }
+
       // The shaped, local-space glyph outlines are supplied out-of-band (async
       // shaping). No layout yet -> nothing to draw.
       const localPath = options.textPaths?.get(id);
       if (localPath && localPath.subpaths.length > 0) {
-        const screenMat = compose(worldToScreen, doc.getWorldMatrix(id));
         emitVector(id, localPath, text.fill, text.stroke, text.fillRule ?? 'nonzero', screenMat, opacity, blend);
       }
       return;

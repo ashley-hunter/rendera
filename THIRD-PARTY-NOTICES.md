@@ -16,6 +16,14 @@ notices are retained here as required.
 - **unicode-properties** — Unicode script/category lookup (UAX #24 data).
   License: MIT. © 2014 Devon Govett.
 
+## Algorithms
+
+- **MSDF** — `packages/core/src/lib/text/msdf.ts` is an original TypeScript
+  implementation based on the algorithm from Viktor Chlumsky's **msdfgen** (MIT):
+  edge coloring, per-channel signed pseudo-distance, and median reconstruction.
+  No msdfgen source is vendored; the credit is for the algorithm.
+  https://github.com/Chlumsky/msdfgen
+
 ## Bundled fonts
 
 - **Crimson Pro** (Regular), embedded in the Storybook showcase.

@@ -12,6 +12,8 @@ import {
   createCamera,
   fitBounds,
   layoutTextNode,
+  layoutTextNodeGlyphs,
+  MsdfAtlas,
   panBy,
   RenderaFont,
   vec2,
@@ -19,6 +21,7 @@ import {
   withPixelRatio,
   zoomAround,
   type Camera,
+  type MsdfNodeLayout,
   type NodeId,
   type Path,
   type SceneDocument,
@@ -84,6 +87,8 @@ export class WebGpuScene {
   private document: SceneDocument = createSampleDocument();
   /** Shaped, local-space glyph outlines per text node (async; empty until ready). */
   private textPaths: ReadonlyMap<NodeId, Path> = new Map();
+  /** Pre-baked MSDF layouts per (small) text node. */
+  private textMsdf: ReadonlyMap<NodeId, MsdfNodeLayout> = new Map();
   private readonly camera = signal<Camera>(createCamera({ pan: vec2(20, 20) }));
   private renderer: WebGpuRenderer | null = null;
   private resizeObserver?: ResizeObserver;
@@ -156,11 +161,14 @@ export class WebGpuScene {
     this.message.set(message);
   }
 
+  /** Text at/under this em size (px) routes to MSDF; larger to analytic outlines. */
+  private static readonly MSDF_MAX_PX = 48;
+
   /**
-   * Load the scene's fonts and shape its text nodes into local-space glyph
-   * outlines (HarfBuzz; the wasm loads lazily on first font). Runs once before
-   * the first draw. Each shaped node's `size` is filled in so world bounds (and
-   * fit-to-content framing) work.
+   * Load the scene's fonts and prepare its text nodes for drawing. Small/plain
+   * text routes to the MSDF atlas (cheap, cached); large or stroked text uses
+   * the analytic outline fill (perfect at any size). Runs once before the first
+   * draw; fills each node's `size` so world bounds (and fit) work.
    */
   private async prepareText(source: SceneSource | null): Promise<void> {
     if (!source?.fonts?.length) {
@@ -174,7 +182,12 @@ export class WebGpuScene {
           : font.src;
       fonts.set(font.id, await RenderaFont.load(data));
     }
+
     const paths = new Map<NodeId, Path>();
+    // One shared atlas (the showcase uses a single font); grows as glyphs bake.
+    let atlas: MsdfAtlas | undefined;
+    const msdfNodes: { id: NodeId; glyphs: { originX: number; originY: number; glyphId: number }[]; fontSize: number }[] = [];
+
     for (const node of this.document) {
       if (node.type !== 'text') {
         continue;
@@ -184,13 +197,51 @@ export class WebGpuScene {
       if (!font) {
         continue;
       }
-      const layout = layoutTextNode(font, text);
-      paths.set(node.id, layout.path);
-      if (!text.size) {
-        this.document.update(node.id, { size: vec2(layout.width, layout.height) });
+      const useMsdf = text.fontSize <= WebGpuScene.MSDF_MAX_PX && !text.stroke;
+      if (useMsdf) {
+        atlas ??= new MsdfAtlas(font, { emPx: 40, pxRange: 4 });
+        const laid = layoutTextNodeGlyphs(font, text);
+        for (const g of laid.glyphs) {
+          atlas.glyph(g.glyphId); // bake now (may grow the atlas)
+        }
+        msdfNodes.push({
+          id: node.id,
+          glyphs: laid.glyphs.map((g) => ({ originX: g.originX, originY: g.originY, glyphId: g.glyphId })),
+          fontSize: text.fontSize,
+        });
+        if (!text.size) {
+          this.document.update(node.id, { size: vec2(laid.width, laid.height) });
+        }
+      } else {
+        const layout = layoutTextNode(font, text);
+        paths.set(node.id, layout.path);
+        if (!text.size) {
+          this.document.update(node.id, { size: vec2(layout.width, layout.height) });
+        }
       }
     }
     this.textPaths = paths;
+
+    // The atlas is fully baked/grown now; capture final dims + stable cells and
+    // upload once.
+    if (atlas) {
+      const tex = atlas.texture;
+      this.renderer?.setMsdfAtlas(tex.data, tex.width, tex.height);
+      const msdf = new Map<NodeId, MsdfNodeLayout>();
+      for (const n of msdfNodes) {
+        const glyphs = n.glyphs
+          .map((g) => ({ originX: g.originX, originY: g.originY, cell: atlas!.glyph(g.glyphId) }))
+          .filter((g): g is { originX: number; originY: number; cell: NonNullable<typeof g.cell> } => g.cell !== null);
+        msdf.set(n.id, {
+          glyphs,
+          fontSize: n.fontSize,
+          atlasWidth: tex.width,
+          atlasHeight: tex.height,
+          pxRange: atlas.pxRange,
+        });
+      }
+      this.textMsdf = msdf;
+    }
   }
 
   protected fit(): void {
@@ -333,7 +384,7 @@ export class WebGpuScene {
     // geometry lands on the full-resolution backing store.
     const camera = withPixelRatio(this.camera(), this.pixelRatio());
     this.renderer.setRenderList(
-      buildRenderList(this.document, camera, { textPaths: this.textPaths })
+      buildRenderList(this.document, camera, { textPaths: this.textPaths, textMsdf: this.textMsdf })
     );
     this.renderer.render();
     this.recordFrame();
