@@ -159,6 +159,8 @@ export interface TextNode extends SpatialNode {
   language?: string;
   /** OpenType feature toggles, e.g. `['dlig', 'ss01']`. */
   features?: readonly string[];
+  /** Wrap width in px; when set, text wraps greedily to fit within it. */
+  maxWidth?: number;
   /** Optional explicit block extent for bounds/hit-testing (top-left origin). */
   size?: Vec2;
 }

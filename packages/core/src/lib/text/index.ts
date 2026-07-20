@@ -3,3 +3,4 @@
 export * from './font';
 export * from './itemize';
 export * from './layout';
+export * from './msdf';

@@ -38,6 +38,9 @@ export interface TextOptions {
   readonly language?: string;
   /** OpenType feature toggles, e.g. `['dlig', 'ss01', '-liga']`. */
   readonly features?: readonly string[];
+  /** Wrap width in px. When set, lines break greedily at word boundaries (with
+   * break-word fallback for overlong tokens) to fit within it. */
+  readonly maxWidth?: number;
 }
 
 /** The result of laying out a text block. */
@@ -63,6 +66,103 @@ interface PlacedGlyph {
   yOffset: number;
 }
 
+/** Per-line shaping context (font-independent style, resolved to px scale). */
+interface ShapeContext {
+  scale: number;
+  letter: number;
+  baseDir?: 'ltr' | 'rtl';
+  language?: string;
+  features?: readonly string[];
+}
+
+/** Shape one line (bidi-itemized, reordered, pen-advanced) to placed glyphs. */
+function shapeLine(font: RenderaFont, line: string, ctx: ShapeContext): { glyphs: PlacedGlyph[]; width: number } {
+  const { runs } = itemize(line, ctx.baseDir);
+  const shaped = runs.map((r) => ({
+    level: r.level,
+    glyphs: font.shape(line.slice(r.start, r.end), {
+      direction: r.rtl ? 'rtl' : 'ltr',
+      language: ctx.language,
+      features: ctx.features,
+    }),
+  }));
+  const visual = reorderRunsVisually(shaped);
+  let penX = 0;
+  const glyphs: PlacedGlyph[] = [];
+  for (const run of visual) {
+    for (const g of run.glyphs) {
+      glyphs.push({ glyphId: g.glyphId, x: penX + g.xOffset * ctx.scale, yOffset: g.yOffset * ctx.scale });
+      penX += g.xAdvance * ctx.scale + ctx.letter;
+    }
+  }
+  const width = Math.max(0, penX - (glyphs.length > 0 ? ctx.letter : 0));
+  return { glyphs, width };
+}
+
+const trimEnd = (s: string): string => s.replace(/\s+$/u, '');
+
+// `Intl.Segmenter` is available on all modern runtimes but absent from some TS
+// `lib` targets, so reach it through a typed indirection (with a regex fallback)
+// rather than the global type — keeps core self-contained for any consumer.
+interface Segments {
+  segment(input: string): Iterable<{ segment: string }>;
+}
+type SegmenterCtor = new (
+  locale?: string,
+  options?: { granularity?: 'grapheme' | 'word' }
+) => Segments;
+const IntlSegmenter = (Intl as unknown as { Segmenter?: SegmenterCtor }).Segmenter;
+
+/** Split `text` at word or grapheme boundaries (Intl.Segmenter, with fallback). */
+function segments(text: string, granularity: 'word' | 'grapheme', locale?: string): string[] {
+  if (IntlSegmenter) {
+    return [...new IntlSegmenter(locale || undefined, { granularity }).segment(text)].map((s) => s.segment);
+  }
+  return granularity === 'word' ? text.split(/(?<=\s)(?=\S)/u) : [...text];
+}
+
+/** Split an overlong token to fit `maxWidth` at grapheme boundaries. */
+function breakToken(font: RenderaFont, token: string, ctx: ShapeContext, maxWidth: number): string[] {
+  if (token === '' || shapeLine(font, token, ctx).width <= maxWidth) {
+    return [token];
+  }
+  const graphemes = segments(token, 'grapheme', ctx.language);
+  const out: string[] = [];
+  let cur = '';
+  for (const g of graphemes) {
+    if (cur !== '' && shapeLine(font, cur + g, ctx).width > maxWidth) {
+      out.push(cur);
+      cur = g;
+    } else {
+      cur += g;
+    }
+  }
+  if (cur !== '') {
+    out.push(cur);
+  }
+  return out;
+}
+
+/** Greedily wrap a paragraph to `maxWidth`, breaking at word boundaries. */
+function wrapParagraph(font: RenderaFont, para: string, ctx: ShapeContext, maxWidth: number): string[] {
+  if (para === '') {
+    return [''];
+  }
+  const tokens = segments(para, 'word', ctx.language);
+  const lines: string[] = [];
+  let cur = '';
+  for (const tok of tokens) {
+    if (cur !== '' && shapeLine(font, trimEnd(cur + tok), ctx).width > maxWidth) {
+      lines.push(trimEnd(cur));
+      cur = /^\s+$/u.test(tok) ? '' : tok; // whitespace never starts a wrapped line
+    } else {
+      cur += tok;
+    }
+  }
+  lines.push(trimEnd(cur));
+  return lines.flatMap((l) => breakToken(font, l, ctx, maxWidth));
+}
+
 /** Lay out `text` with `font` and `options` into positioned glyph outlines. */
 export function layoutText(font: RenderaFont, text: string, options: TextOptions): TextLayout {
   const scale = options.fontSize / font.upem;
@@ -73,33 +173,16 @@ export function layoutText(font: RenderaFont, text: string, options: TextOptions
   const m = font.metrics;
   const lineHeight = options.lineHeight ?? (m.ascender + m.descender + m.lineGap) * scale;
   const ascent = m.ascender * scale;
+  const ctx: ShapeContext = { scale, letter, baseDir, language: options.language, features: options.features };
 
-  const lines = text.split('\n');
+  const wrap = options.maxWidth && options.maxWidth > 0 ? options.maxWidth : 0;
+  const rawLines = text.split('\n');
+  const lines = wrap ? rawLines.flatMap((p) => wrapParagraph(font, p, ctx, wrap)) : rawLines;
 
   // Pass 1: shape + place each line's glyphs, measuring line width.
-  const perLine = lines.map((line) => {
-    const { runs } = itemize(line, baseDir);
-    const shaped = runs.map((r) => ({
-      level: r.level,
-      glyphs: font.shape(line.slice(r.start, r.end), {
-        direction: r.rtl ? 'rtl' : 'ltr',
-        language: options.language,
-        features: options.features,
-      }),
-    }));
-    const visual = reorderRunsVisually(shaped);
-    let penX = 0;
-    const glyphs: PlacedGlyph[] = [];
-    for (const run of visual) {
-      for (const g of run.glyphs) {
-        glyphs.push({ glyphId: g.glyphId, x: penX + g.xOffset * scale, yOffset: g.yOffset * scale });
-        penX += g.xAdvance * scale + letter;
-      }
-    }
-    const width = Math.max(0, penX - (glyphs.length > 0 ? letter : 0));
-    return { glyphs, width };
-  });
-  const blockWidth = perLine.reduce((w, l) => Math.max(w, l.width), 0);
+  const perLine = lines.map((line) => shapeLine(font, line, ctx));
+  // Alignment is within the wrap box when set, else the widest line.
+  const blockWidth = wrap ? wrap : perLine.reduce((w, l) => Math.max(w, l.width), 0);
 
   // Pass 2: bake glyph outlines into one local-space path, aligned + stacked.
   const subpaths: SubPath[] = [];
@@ -137,5 +220,6 @@ export function layoutTextNode(font: RenderaFont, node: TextNode): TextLayout {
     direction: node.direction,
     language: node.language,
     features: node.features,
+    maxWidth: node.maxWidth,
   });
 }

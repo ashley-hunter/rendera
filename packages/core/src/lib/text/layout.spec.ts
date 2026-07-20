@@ -51,6 +51,27 @@ describe('layoutText', () => {
     expect(three.width).toBeCloseTo(one.width, 3);
   });
 
+  it('word-wraps to a width box, keeping every line within it', () => {
+    const text = 'the quick brown fox jumps over the lazy dog';
+    const full = layoutText(font, text, { fontSize: 30 });
+    const box = full.width / 3;
+    const wrapped = layoutText(font, text, { fontSize: 30, maxWidth: box });
+    expect(wrapped.lineCount).toBeGreaterThan(1);
+    // The wrap box drives the block width, and no glyph spills past it (left-aligned).
+    expect(wrapped.width).toBeCloseTo(box, 3);
+    expect(pathBounds(wrapped.path)!.maxX).toBeLessThanOrEqual(box + 2);
+    expect(wrapped.height).toBeGreaterThan(full.height * 2);
+  });
+
+  it('break-words an overlong token that cannot fit', () => {
+    const long = 'Supercalifragilisticexpialidocious';
+    const oneLine = layoutText(font, long, { fontSize: 40 });
+    const box = oneLine.width / 3;
+    const broken = layoutText(font, long, { fontSize: 40, maxWidth: box });
+    expect(broken.lineCount).toBeGreaterThan(1);
+    expect(pathBounds(broken.path)!.maxX).toBeLessThanOrEqual(box + 3);
+  });
+
   it('right-aligns a short line flush to the block width', () => {
     // Two lines of different widths; the short one shifts right when aligned.
     const text = 'i\nwwwww';

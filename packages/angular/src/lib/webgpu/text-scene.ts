@@ -96,15 +96,18 @@ export function createTextScene(): SceneSource {
     stroke: { paint: { type: 'solid', color: rgb(14, 22, 44) }, width: 2.5, join: 'round' },
   });
 
-  // A wrapped-by-hand paragraph, centre-aligned, proving multi-line layout.
+  // A paragraph auto-wrapped to a width box (greedy word-wrap), proving layout.
   doc.insert<TextNode>({
     type: 'text',
     name: 'paragraph',
-    text: 'Every glyph is an outline —\nshaped once, filled analytically,\ncrisp at any zoom.',
+    text:
+      'Every glyph is an outline — shaped once by HarfBuzz, filled analytically, ' +
+      'and razor sharp at any zoom because it is fully resolution independent.',
     fontId: FONT_ID,
     fontSize: 30,
-    align: 'center',
+    align: 'left',
     lineHeight: 40,
+    maxWidth: 620,
     transform: createTransform({ translation: vec2(44, 510) }),
     fill: { type: 'solid', color: rgb(176, 184, 202) },
   });
