@@ -327,4 +327,19 @@ describe('buildRenderList — clip & mask', () => {
     expect(e.dy).toBeCloseTo(12);
     expect(e.radius).toBeCloseTo(16);
   });
+
+  it('passes colour adjustments through unscaled (they carry no lengths)', () => {
+    const doc = newDoc();
+    doc.insert<PathNode>({
+      type: 'path',
+      name: 'p',
+      path: rectPath(0, 0, 100, 100),
+      fill: white,
+      effects: [{ type: 'hue-saturation', hue: 90, saturation: -0.5 }],
+    });
+    const cmds = buildRenderList(doc, createCamera({ zoom: 3 }));
+    const pg = cmds.find((c) => c.op === 'push-group');
+    if (pg?.op !== 'push-group' || !pg.effects) throw new Error('expected effects');
+    expect(pg.effects[0]).toEqual({ type: 'hue-saturation', hue: 90, saturation: -0.5 });
+  });
 });

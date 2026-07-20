@@ -65,10 +65,17 @@ export interface ClipPath {
 
 /**
  * A non-destructive render effect applied to a node's isolated layer, evaluated
- * at render (never baked). Lengths are in the node's LOCAL space, so effects
- * scale with zoom exactly like the vector content they decorate.
+ * at render (never baked). Spatial effects' lengths are in the node's LOCAL
+ * space, so they scale with zoom like the vector content; adjustment effects are
+ * per-pixel colour transforms (unitless). All operate in linear light.
  */
-export type Effect = BlurEffect | DropShadowEffect | OuterGlowEffect;
+export type Effect =
+  | BlurEffect
+  | DropShadowEffect
+  | OuterGlowEffect
+  | BrightnessContrastEffect
+  | HueSaturationEffect
+  | LevelsEffect;
 
 /** Gaussian blur of the whole layer; `radius` is the ~3σ extent in local px. */
 export interface BlurEffect {
@@ -90,6 +97,43 @@ export interface OuterGlowEffect {
   readonly type: 'outer-glow';
   readonly radius: number;
   readonly color: LinearRgba;
+}
+
+/**
+ * Brightness/contrast adjustment. `brightness` adds a linear offset; `contrast`
+ * scales around mid-grey. Both default 0 (no change); the usual range is
+ * [-1, 1].
+ */
+export interface BrightnessContrastEffect {
+  readonly type: 'brightness-contrast';
+  readonly brightness: number;
+  readonly contrast: number;
+}
+
+/**
+ * Hue/saturation/lightness adjustment. `hue` rotates in degrees (luminance-
+ * preserving); `saturation` in [-1, 1] (−1 = greyscale); `lightness` in [-1, 1]
+ * (mixes toward black/white). Omitted channels default to no change.
+ */
+export interface HueSaturationEffect {
+  readonly type: 'hue-saturation';
+  readonly hue?: number;
+  readonly saturation?: number;
+  readonly lightness?: number;
+}
+
+/**
+ * Photographic "levels": remap the input range `[inBlack, inWhite]` through a
+ * `gamma` curve into the output range `[outBlack, outWhite]` (all in [0, 1],
+ * applied per channel). Defaults are the identity (0/1/1/0/1).
+ */
+export interface LevelsEffect {
+  readonly type: 'levels';
+  readonly inBlack?: number;
+  readonly inWhite?: number;
+  readonly gamma?: number;
+  readonly outBlack?: number;
+  readonly outWhite?: number;
 }
 
 /** What a soft mask's value is read from: content luminance (default) or alpha. */

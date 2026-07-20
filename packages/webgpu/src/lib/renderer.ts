@@ -436,8 +436,70 @@ struct SiluP { color : vec4f, offset : vec4f };
 }
 `;
 
+// Per-pixel colour adjustment (brightness/contrast, hue/saturation, levels), all
+// in linear light. Reads premultiplied linear, un-premultiplies to straight
+// colour, transforms, re-premultiplies (alpha untouched). `mode` selects the
+// adjustment; params live in p0/p1.
+const ADJUST_SHADER = /* wgsl */ `
+@group(0) @binding(0) var layerTex : texture_2d<f32>;
+struct AdjP { p0 : vec4f, p1 : vec4f, mode : f32, _a : f32, _b : f32, _c : f32 };
+@group(0) @binding(1) var<uniform> ap : AdjP;
+
+@vertex fn vs(@builtin(vertex_index) i : u32) -> @builtin(position) vec4f {
+  var p = array<vec2f, 3>(vec2f(-1.0, -1.0), vec2f(3.0, -1.0), vec2f(-1.0, 3.0));
+  return vec4f(p[i], 0.0, 1.0);
+}
+
+// SVG feColorMatrix luminance-preserving hue rotation.
+fn hueRotate(c : vec3f, a : f32) -> vec3f {
+  let cA = cos(a);
+  let sA = sin(a);
+  let r = dot(c, vec3f(0.213 + cA * 0.787 - sA * 0.213, 0.715 - cA * 0.715 - sA * 0.715, 0.072 - cA * 0.072 + sA * 0.928));
+  let g = dot(c, vec3f(0.213 - cA * 0.213 + sA * 0.143, 0.715 + cA * 0.285 + sA * 0.140, 0.072 - cA * 0.072 - sA * 0.283));
+  let b = dot(c, vec3f(0.213 - cA * 0.213 - sA * 0.787, 0.715 - cA * 0.715 + sA * 0.715, 0.072 + cA * 0.928 + sA * 0.072));
+  return vec3f(r, g, b);
+}
+
+@fragment fn fs(@builtin(position) frag : vec4f) -> @location(0) vec4f {
+  let src = textureLoad(layerTex, vec2i(frag.xy), 0);
+  if (src.a <= 0.0) { return src; }
+  var c = src.rgb / src.a; // straight linear colour
+  let mode = i32(ap.mode);
+  if (mode == 0) {
+    c = c + vec3f(ap.p0.x);                 // brightness
+    c = (c - vec3f(0.5)) * (1.0 + ap.p0.y) + vec3f(0.5); // contrast about mid-grey
+  } else if (mode == 1) {
+    c = hueRotate(c, ap.p0.x);
+    let luma = dot(c, vec3f(0.2126, 0.7152, 0.0722));
+    c = mix(vec3f(luma), c, 1.0 + ap.p0.y); // saturation
+    let l = ap.p0.z;                          // lightness
+    if (l >= 0.0) { c = mix(c, vec3f(1.0), l); } else { c = mix(c, vec3f(0.0), -l); }
+  } else {
+    let inB = ap.p0.x; let inW = ap.p0.y; let g = ap.p0.z; let outB = ap.p0.w; let outW = ap.p1.x;
+    c = clamp((c - vec3f(inB)) / max(inW - inB, 1e-4), vec3f(0.0), vec3f(1.0));
+    c = pow(c, vec3f(1.0 / max(g, 1e-4)));
+    c = vec3f(outB) + c * (outW - outB);
+  }
+  c = clamp(c, vec3f(0.0), vec3f(1.0));
+  return vec4f(c * src.a, src.a); // re-premultiply
+}
+`;
+
 /** Cap on blur taps per axis (bounds cost for very large radii / deep zoom). */
 const MAX_BLUR_TAPS = 128;
+
+/** Pack a colour adjustment into a shader mode + [p0..p4] (see ADJUST_SHADER). */
+function adjustParams(
+  e: Extract<ScreenEffect, { type: 'brightness-contrast' | 'hue-saturation' | 'levels' }>
+): [number, number[]] {
+  if (e.type === 'brightness-contrast') {
+    return [0, [e.brightness, e.contrast, 0, 0, 0]];
+  }
+  if (e.type === 'hue-saturation') {
+    return [1, [((e.hue ?? 0) * Math.PI) / 180, e.saturation ?? 0, e.lightness ?? 0, 0, 0]];
+  }
+  return [2, [e.inBlack ?? 0, e.inWhite ?? 1, e.gamma ?? 1, e.outBlack ?? 0, e.outWhite ?? 1]];
+}
 
 // Analytic vector fill (ADR 0007). Per pixel: winding number (ray crossings) for
 // inside/outside under the fill rule, plus the exact distance to the nearest
@@ -838,6 +900,9 @@ export class WebGpuRenderer {
   /** Uniform slots (256B each) for per-op silhouette (shadow/glow) params. */
   private siluParamsBuffer: GPUBuffer;
   private siluParamsSlots = 0;
+  /** Uniform slots (256B each) for per-op colour-adjustment params. */
+  private adjustParamsBuffer: GPUBuffer;
+  private adjustParamsSlots = 0;
 
   /** Pool of layer-sized targets reused across frames. */
   private readonly targetPool: GPUTexture[] = [];
@@ -873,6 +938,7 @@ export class WebGpuRenderer {
     private readonly maskCompositor: CompositorResources,
     private readonly blur: CompositorResources,
     private readonly silhouette: CompositorResources,
+    private readonly adjust: CompositorResources,
     private readonly pathResources: PathResources,
     private readonly msdf: MsdfResources,
     width: number,
@@ -903,6 +969,11 @@ export class WebGpuRenderer {
       usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
     });
     this.siluParamsSlots = 1;
+    this.adjustParamsBuffer = this.device.createBuffer({
+      size: 256,
+      usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+    });
+    this.adjustParamsSlots = 1;
     this.pathParamsBuffer = this.device.createBuffer({
       size: 256,
       usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
@@ -1182,8 +1253,16 @@ export class WebGpuRenderer {
       fragment: { module: siluModule, entryPoint: 'fs', targets: [{ format: SCENE_FORMAT }] },
       primitive: { topology: 'triangle-list' },
     });
+    const adjustModule = device.createShaderModule({ code: ADJUST_SHADER });
+    const adjustPipeline = device.createRenderPipeline({
+      layout: effectPipelineLayout,
+      vertex: { module: adjustModule, entryPoint: 'vs' },
+      fragment: { module: adjustModule, entryPoint: 'fs', targets: [{ format: SCENE_FORMAT }] },
+      primitive: { topology: 'triangle-list' },
+    });
     const blurResources: CompositorResources = { pipeline: blurPipeline, layout: effectLayout };
     const siluResources: CompositorResources = { pipeline: siluPipeline, layout: effectLayout };
+    const adjustResources: CompositorResources = { pipeline: adjustPipeline, layout: effectLayout };
 
     // --- vector-fill pipeline (analytic coverage -> layer target) ---
     const pathModule = device.createShaderModule({ code: PATH_SHADER });
@@ -1314,6 +1393,7 @@ export class WebGpuRenderer {
       maskResources,
       blurResources,
       siluResources,
+      adjustResources,
       pathResources,
       msdfResources,
       width,
@@ -1459,6 +1539,7 @@ export class WebGpuRenderer {
     let maskOps = 0;
     let blurOps = 0;
     let siluOps = 0;
+    let adjustOps = 0;
     for (const cmd of commands) {
       if (cmd.op === 'draw-solid') {
         const m = cmd.transform;
@@ -1523,10 +1604,12 @@ export class WebGpuRenderer {
         for (const e of cmd.effects ?? []) {
           if (e.type === 'blur') {
             blurOps += 2; // horizontal + vertical
-          } else {
+          } else if (e.type === 'drop-shadow' || e.type === 'outer-glow') {
             siluOps += 1; // silhouette seed
             blurOps += 2; // blur it
             blendOps += 1; // composite the shadow/glow behind the layer
+          } else {
+            adjustOps += 1; // one colour-transform pass
           }
         }
       }
@@ -1564,6 +1647,7 @@ export class WebGpuRenderer {
     this.ensureBlendParams(blendOps);
     this.ensureMaskParams(maskOps);
     this.ensureEffectParams(blurOps, siluOps);
+    this.ensureAdjustParams(adjustOps);
   }
 
   /**
@@ -1757,6 +1841,52 @@ export class WebGpuRenderer {
     }
   }
 
+  /** Ensure the adjustment-param uniform buffer has one 256B slot per op. */
+  private ensureAdjustParams(slots: number): void {
+    const need = Math.max(1, slots);
+    if (need <= this.adjustParamsSlots) {
+      return;
+    }
+    this.adjustParamsBuffer.destroy();
+    this.adjustParamsBuffer = this.device.createBuffer({
+      size: need * 256,
+      usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+    });
+    this.adjustParamsSlots = need;
+  }
+
+  /** One colour-adjustment pass (`mode` + up to eight params in p0/p1). */
+  private adjustPass(
+    encoder: GPUCommandEncoder,
+    dest: GPUTexture,
+    src: GPUTexture,
+    mode: number,
+    params: readonly number[],
+    slot: number
+  ): void {
+    const offset = slot * 256;
+    // p0[4], p1[4], mode, pad×3.
+    this.device.queue.writeBuffer(
+      this.adjustParamsBuffer,
+      offset,
+      new Float32Array([params[0], params[1], params[2], params[3], params[4], 0, 0, 0, mode, 0, 0, 0])
+    );
+    const bindGroup = this.device.createBindGroup({
+      layout: this.adjust.layout,
+      entries: [
+        { binding: 0, resource: src.createView() },
+        { binding: 1, resource: { buffer: this.adjustParamsBuffer, offset, size: 48 } },
+      ],
+    });
+    const pass = encoder.beginRenderPass({
+      colorAttachments: [{ view: dest.createView(), loadOp: 'clear', storeOp: 'store', clearValue: { r: 0, g: 0, b: 0, a: 0 } }],
+    });
+    pass.setPipeline(this.adjust.pipeline);
+    pass.setBindGroup(0, bindGroup);
+    pass.draw(3);
+    pass.end();
+  }
+
   /** One separable Gaussian blur pass (horizontal or vertical). */
   private blurPass(
     encoder: GPUCommandEncoder,
@@ -1873,6 +2003,7 @@ export class WebGpuRenderer {
     this.maskParamsBuffer.destroy();
     this.blurParamsBuffer.destroy();
     this.siluParamsBuffer.destroy();
+    this.adjustParamsBuffer.destroy();
     this.pathParamsBuffer.destroy();
     this.edgeBuffer?.destroy();
     this.bandTableBuffer?.destroy();
@@ -1915,6 +2046,7 @@ export class WebGpuRenderer {
     let maskSlot = 0;
     let blurSlot = 0;
     let siluSlot = 0;
+    let adjustSlot = 0;
     // Coverage targets captured by `pop-mask`, consumed by the next masked
     // `push-group` (LIFO — a push-group always follows its pop-mask).
     const pendingMasks: GPUTexture[] = [];
@@ -1941,6 +2073,14 @@ export class WebGpuRenderer {
       for (const e of effects) {
         if (e.type === 'blur') {
           layer = blur2(layer, e.radius);
+          continue;
+        }
+        if (e.type === 'brightness-contrast' || e.type === 'hue-saturation' || e.type === 'levels') {
+          const adjusted = this.acquireTarget();
+          const [mode, params] = adjustParams(e);
+          this.adjustPass(encoder, adjusted, layer, mode, params, adjustSlot++);
+          this.releaseTarget(layer);
+          layer = adjusted;
           continue;
         }
         // Drop shadow / outer glow: a blurred, tinted silhouette behind the layer.

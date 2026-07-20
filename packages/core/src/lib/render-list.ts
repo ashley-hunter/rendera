@@ -162,11 +162,16 @@ export interface PushGroupCommand {
   readonly effects?: readonly ScreenEffect[];
 }
 
-/** A render effect with its lengths resolved to screen space (see `Effect`). */
+/**
+ * A render effect with its spatial lengths resolved to screen space. Colour
+ * adjustments (brightness/contrast, hue/saturation, levels) are unitless and
+ * pass through unchanged (they carry no lengths to scale).
+ */
 export type ScreenEffect =
   | { readonly type: 'blur'; readonly radius: number }
   | { readonly type: 'drop-shadow'; readonly dx: number; readonly dy: number; readonly radius: number; readonly color: LinearRgba }
-  | { readonly type: 'outer-glow'; readonly radius: number; readonly color: LinearRgba };
+  | { readonly type: 'outer-glow'; readonly radius: number; readonly color: LinearRgba }
+  | Extract<Effect, { type: 'brightness-contrast' | 'hue-saturation' | 'levels' }>;
 
 /** Resolve an effect's local-space lengths to screen space via the node matrix. */
 function toScreenEffect(e: Effect, m: Mat2D): ScreenEffect {
@@ -177,13 +182,16 @@ function toScreenEffect(e: Effect, m: Mat2D): ScreenEffect {
   if (e.type === 'outer-glow') {
     return { type: 'outer-glow', radius: e.radius * scale, color: e.color };
   }
-  return {
-    type: 'drop-shadow',
-    dx: m.a * e.dx + m.c * e.dy, // offset is a vector: apply the linear part only
-    dy: m.b * e.dx + m.d * e.dy,
-    radius: e.radius * scale,
-    color: e.color,
-  };
+  if (e.type === 'drop-shadow') {
+    return {
+      type: 'drop-shadow',
+      dx: m.a * e.dx + m.c * e.dy, // offset is a vector: apply the linear part only
+      dy: m.b * e.dx + m.d * e.dy,
+      radius: e.radius * scale,
+      color: e.color,
+    };
+  }
+  return e; // colour adjustments are unitless
 }
 
 /** End the current isolated group, compositing it onto the backdrop. */
