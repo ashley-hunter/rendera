@@ -15,6 +15,7 @@
 import type { BlendMode } from './blend';
 import type { BooleanOp } from './boolean';
 import type { Paint } from './paint';
+import type { LinearRgba } from './render-list';
 import type { FillRule, Path } from './path';
 import type { StrokeCap, StrokeJoin } from './stroke';
 import type { TextAlign, TextDirection } from './text/layout';
@@ -62,6 +63,35 @@ export interface ClipPath {
   readonly rule?: FillRule;
 }
 
+/**
+ * A non-destructive render effect applied to a node's isolated layer, evaluated
+ * at render (never baked). Lengths are in the node's LOCAL space, so effects
+ * scale with zoom exactly like the vector content they decorate.
+ */
+export type Effect = BlurEffect | DropShadowEffect | OuterGlowEffect;
+
+/** Gaussian blur of the whole layer; `radius` is the ~3σ extent in local px. */
+export interface BlurEffect {
+  readonly type: 'blur';
+  readonly radius: number;
+}
+
+/** A blurred, tinted, offset copy of the layer's silhouette composited behind it. */
+export interface DropShadowEffect {
+  readonly type: 'drop-shadow';
+  readonly dx: number;
+  readonly dy: number;
+  readonly radius: number;
+  readonly color: LinearRgba;
+}
+
+/** A blurred, tinted copy of the layer's silhouette composited behind it (a halo). */
+export interface OuterGlowEffect {
+  readonly type: 'outer-glow';
+  readonly radius: number;
+  readonly color: LinearRgba;
+}
+
 /** What a soft mask's value is read from: content luminance (default) or alpha. */
 export type MaskType = 'luminance' | 'alpha';
 
@@ -95,6 +125,8 @@ export interface SpatialNode extends SceneNode {
   clip?: ClipPath;
   /** Modulate the node's alpha by a mask node's luminance or alpha. */
   mask?: MaskRef;
+  /** Non-destructive render effects (blur, drop shadow, glow), applied in order. */
+  effects?: readonly Effect[];
 }
 
 /** The single, non-spatial root of a document (the coordinate origin). */

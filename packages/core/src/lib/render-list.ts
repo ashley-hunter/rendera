@@ -21,7 +21,7 @@ import type { SceneDocument } from './document';
 import type { NodeId } from './id';
 import { booleanPath } from './boolean';
 import { compose, fromScaling, fromTranslation, invert, transformPoint, IDENTITY, type Mat2D } from './matrix';
-import type { BooleanNode, GroupNode, ImageNode, LayerNode, MaskType, PathNode, SpatialNode, Stroke, TextNode } from './node';
+import type { BooleanNode, Effect, GroupNode, ImageNode, LayerNode, MaskType, PathNode, SpatialNode, Stroke, TextNode } from './node';
 import type { Paint } from './paint';
 import {
   pathBounds,
@@ -154,6 +154,36 @@ export interface PushGroupCommand {
    * mask whose content is the clip path filled opaque.
    */
   readonly mask?: { readonly type: MaskType };
+  /**
+   * Non-destructive effects applied to this group's layer (in order) before it
+   * composites. Lengths are in screen space (local × the on-screen scale); the
+   * compositor scales them to target px. See `ScreenEffect`.
+   */
+  readonly effects?: readonly ScreenEffect[];
+}
+
+/** A render effect with its lengths resolved to screen space (see `Effect`). */
+export type ScreenEffect =
+  | { readonly type: 'blur'; readonly radius: number }
+  | { readonly type: 'drop-shadow'; readonly dx: number; readonly dy: number; readonly radius: number; readonly color: LinearRgba }
+  | { readonly type: 'outer-glow'; readonly radius: number; readonly color: LinearRgba };
+
+/** Resolve an effect's local-space lengths to screen space via the node matrix. */
+function toScreenEffect(e: Effect, m: Mat2D): ScreenEffect {
+  const scale = Math.sqrt(Math.abs(m.a * m.d - m.b * m.c)) || 1;
+  if (e.type === 'blur') {
+    return { type: 'blur', radius: e.radius * scale };
+  }
+  if (e.type === 'outer-glow') {
+    return { type: 'outer-glow', radius: e.radius * scale, color: e.color };
+  }
+  return {
+    type: 'drop-shadow',
+    dx: m.a * e.dx + m.c * e.dy, // offset is a vector: apply the linear part only
+    dy: m.b * e.dx + m.d * e.dy,
+    radius: e.radius * scale,
+    color: e.color,
+  };
 }
 
 /** End the current isolated group, compositing it onto the backdrop. */
@@ -475,7 +505,7 @@ export function buildRenderList(
     }
   };
 
-  /** Emit `content`, wrapped in the node's clip and/or mask coverage layers. */
+  /** Emit `content`, wrapped in the node's effect, mask, and clip layers. */
   function withLayers(
     id: NodeId,
     node: SpatialNode,
@@ -483,7 +513,15 @@ export function buildRenderList(
     blend: BlendMode,
     content: (opacity: number, blend: BlendMode) => void
   ): void {
-    const layers: { type: MaskType; emit: () => void }[] = [];
+    // Wrappers, OUTERMOST first: effects (post-process the finished layer) →
+    // soft mask → geometric clip (innermost, closest to the content). The
+    // outermost wrapper carries the node's opacity/blend.
+    const wrappers: { coverage?: { type: MaskType; emit: () => void }; effects?: readonly ScreenEffect[] }[] = [];
+
+    if (node.effects && node.effects.length > 0) {
+      const screenMat = compose(screenBase, doc.getWorldMatrix(id));
+      wrappers.push({ effects: node.effects.map((e) => toScreenEffect(e, screenMat)) });
+    }
 
     // Soft mask: render the mask node's content rebased into this node's local
     // space (so a mask def is reusable and positioned relative to the target).
@@ -495,15 +533,17 @@ export function buildRenderList(
         doc.getWorldMatrix(id),
         invert(doc.getWorldMatrix(maskRef.maskId)) ?? IDENTITY
       );
-      layers.push({
-        type: maskRef.type ?? 'luminance',
-        emit: () => {
-          const saved = screenBase;
-          screenBase = rebase;
-          for (const child of doc.getChildren(maskRef.maskId)) {
-            visit(child.id);
-          }
-          screenBase = saved;
+      wrappers.push({
+        coverage: {
+          type: maskRef.type ?? 'luminance',
+          emit: () => {
+            const saved = screenBase;
+            screenBase = rebase;
+            for (const child of doc.getChildren(maskRef.maskId)) {
+              visit(child.id);
+            }
+            screenBase = saved;
+          },
         },
       });
     }
@@ -513,33 +553,34 @@ export function buildRenderList(
     if (node.clip) {
       const clip = node.clip;
       const screenMat = compose(screenBase, doc.getWorldMatrix(id));
-      layers.push({
-        type: 'alpha',
-        emit: () =>
-          emitVector(id, clip.path, { type: 'solid', color: { r: 1, g: 1, b: 1, a: 1 } }, undefined, clip.rule ?? 'nonzero', screenMat, 1, 'normal'),
+      wrappers.push({
+        coverage: {
+          type: 'alpha',
+          emit: () =>
+            emitVector(id, clip.path, { type: 'solid', color: { r: 1, g: 1, b: 1, a: 1 } }, undefined, clip.rule ?? 'nonzero', screenMat, 1, 'normal'),
+        },
       });
     }
 
-    if (layers.length === 0) {
-      content(opacity, blend); // mask reference was invalid and there is no clip
+    if (wrappers.length === 0) {
+      content(opacity, blend); // nothing applied (e.g. an invalid mask reference)
       return;
     }
-    // Nest one isolated group per coverage layer; the OUTERMOST carries the
-    // node's opacity/blend so they apply to the final masked result.
-    layers.forEach((layer, i) => {
-      commands.push({ op: 'push-mask', nodeId: id });
-      layer.emit();
-      commands.push({ op: 'pop-mask', nodeId: id });
-      commands.push({
-        op: 'push-group',
-        nodeId: id,
-        opacity: i === 0 ? opacity : 1,
-        blend: i === 0 ? blend : 'normal',
-        mask: { type: layer.type },
-      });
+    // Nest one isolated group per wrapper; the OUTERMOST carries opacity/blend.
+    wrappers.forEach((w, i) => {
+      const op = i === 0 ? opacity : 1;
+      const bl = i === 0 ? blend : 'normal';
+      if (w.coverage) {
+        commands.push({ op: 'push-mask', nodeId: id });
+        w.coverage.emit();
+        commands.push({ op: 'pop-mask', nodeId: id });
+        commands.push({ op: 'push-group', nodeId: id, opacity: op, blend: bl, mask: { type: w.coverage.type } });
+      } else {
+        commands.push({ op: 'push-group', nodeId: id, opacity: op, blend: bl, effects: w.effects });
+      }
     });
     content(1, 'normal');
-    for (let i = 0; i < layers.length; i++) {
+    for (let i = 0; i < wrappers.length; i++) {
       commands.push({ op: 'pop-group', nodeId: id });
     }
   }
@@ -563,7 +604,7 @@ export function buildRenderList(
     }
     const opacity = node.opacity ?? 1;
     const blend: BlendMode = node.blendMode ?? 'normal';
-    const layered = !!node.clip || !!node.mask;
+    const layered = !!node.clip || !!node.mask || !!(node.effects && node.effects.length > 0);
 
     if (node.type === 'group') {
       const group = node as GroupNode;

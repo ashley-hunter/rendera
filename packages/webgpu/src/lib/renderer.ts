@@ -18,6 +18,7 @@ import {
   type Gradient,
   type Paint,
   type RenderCommand,
+  type ScreenEffect,
 } from '@rendera/core';
 import { blueNoiseTile, BLUE_NOISE_SIZE } from './blue-noise';
 
@@ -78,6 +79,8 @@ interface StackEntry {
   maskTex?: GPUTexture;
   /** Mask channel: 0 = luminance, 1 = alpha. */
   maskChannel?: number;
+  /** Effects applied to the layer at pop (after the mask, before compositing). */
+  effects?: readonly ScreenEffect[];
 }
 
 export interface RendererColor {
@@ -381,6 +384,60 @@ struct MaskP { channel : f32, _p0 : f32, _p1 : f32, _p2 : f32 };
   return layer * coverage;
 }
 `;
+
+// Separable Gaussian blur (one axis per pass). textureLoad returns 0 outside the
+// target, so the premultiplied layer fades to transparent at the edges — exactly
+// what a blur of finite content should do. `dir` is the integer step (1,0)/(0,1).
+const BLUR_SHADER = /* wgsl */ `
+@group(0) @binding(0) var srcTex : texture_2d<f32>;
+struct BlurP { sigma : f32, taps : f32, dirX : f32, dirY : f32 };
+@group(0) @binding(1) var<uniform> bp : BlurP;
+
+@vertex fn vs(@builtin(vertex_index) i : u32) -> @builtin(position) vec4f {
+  var p = array<vec2f, 3>(vec2f(-1.0, -1.0), vec2f(3.0, -1.0), vec2f(-1.0, 3.0));
+  return vec4f(p[i], 0.0, 1.0);
+}
+
+@fragment fn fs(@builtin(position) frag : vec4f) -> @location(0) vec4f {
+  let coord = vec2i(frag.xy);
+  let dir = vec2i(i32(bp.dirX), i32(bp.dirY));
+  let n = i32(bp.taps);
+  let inv = 1.0 / max(2.0 * bp.sigma * bp.sigma, 1e-4);
+  var acc = vec4f(0.0);
+  var wsum = 0.0;
+  for (var i = -n; i <= n; i = i + 1) {
+    let w = exp(-f32(i * i) * inv);
+    acc = acc + w * textureLoad(srcTex, coord + dir * i, 0);
+    wsum = wsum + w;
+  }
+  return acc / wsum;
+}
+`;
+
+// Silhouette: a tinted copy of the layer's alpha, optionally offset — the seed
+// for a drop shadow (offset) or glow (no offset) before it is blurred. Output is
+// premultiplied linear (rgb = colour·coverage), so it blurs and composites like
+// any layer.
+const SILHOUETTE_SHADER = /* wgsl */ `
+@group(0) @binding(0) var srcTex : texture_2d<f32>;
+struct SiluP { color : vec4f, offset : vec4f };
+@group(0) @binding(1) var<uniform> sp : SiluP;
+
+@vertex fn vs(@builtin(vertex_index) i : u32) -> @builtin(position) vec4f {
+  var p = array<vec2f, 3>(vec2f(-1.0, -1.0), vec2f(3.0, -1.0), vec2f(-1.0, 3.0));
+  return vec4f(p[i], 0.0, 1.0);
+}
+
+@fragment fn fs(@builtin(position) frag : vec4f) -> @location(0) vec4f {
+  let coord = vec2i(frag.xy) - vec2i(i32(sp.offset.x), i32(sp.offset.y));
+  let a = textureLoad(srcTex, coord, 0).a;
+  let cov = a * sp.color.a;
+  return vec4f(sp.color.rgb * cov, cov);
+}
+`;
+
+/** Cap on blur taps per axis (bounds cost for very large radii / deep zoom). */
+const MAX_BLUR_TAPS = 128;
 
 // Analytic vector fill (ADR 0007). Per pixel: winding number (ray crossings) for
 // inside/outside under the fill rule, plus the exact distance to the nearest
@@ -775,6 +832,12 @@ export class WebGpuRenderer {
   /** Uniform slots (256B each) for per-op clip/mask channel params. */
   private maskParamsBuffer: GPUBuffer;
   private maskParamsSlots = 0;
+  /** Uniform slots (256B each) for per-pass Gaussian-blur params. */
+  private blurParamsBuffer: GPUBuffer;
+  private blurParamsSlots = 0;
+  /** Uniform slots (256B each) for per-op silhouette (shadow/glow) params. */
+  private siluParamsBuffer: GPUBuffer;
+  private siluParamsSlots = 0;
 
   /** Pool of layer-sized targets reused across frames. */
   private readonly targetPool: GPUTexture[] = [];
@@ -808,6 +871,8 @@ export class WebGpuRenderer {
     private readonly image: ImageResources,
     private readonly compositor: CompositorResources,
     private readonly maskCompositor: CompositorResources,
+    private readonly blur: CompositorResources,
+    private readonly silhouette: CompositorResources,
     private readonly pathResources: PathResources,
     private readonly msdf: MsdfResources,
     width: number,
@@ -828,6 +893,16 @@ export class WebGpuRenderer {
       usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
     });
     this.maskParamsSlots = 1;
+    this.blurParamsBuffer = this.device.createBuffer({
+      size: 256,
+      usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+    });
+    this.blurParamsSlots = 1;
+    this.siluParamsBuffer = this.device.createBuffer({
+      size: 256,
+      usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+    });
+    this.siluParamsSlots = 1;
     this.pathParamsBuffer = this.device.createBuffer({
       size: 256,
       usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
@@ -1085,6 +1160,31 @@ export class WebGpuRenderer {
     });
     const maskResources: CompositorResources = { pipeline: maskPipeline, layout: maskLayout };
 
+    // --- effect pipelines (Gaussian blur + silhouette) ---
+    const effectLayout = device.createBindGroupLayout({
+      entries: [
+        { binding: 0, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'float' } },
+        { binding: 1, visibility: GPUShaderStage.FRAGMENT, buffer: { type: 'uniform' } },
+      ],
+    });
+    const effectPipelineLayout = device.createPipelineLayout({ bindGroupLayouts: [effectLayout] });
+    const blurModule = device.createShaderModule({ code: BLUR_SHADER });
+    const blurPipeline = device.createRenderPipeline({
+      layout: effectPipelineLayout,
+      vertex: { module: blurModule, entryPoint: 'vs' },
+      fragment: { module: blurModule, entryPoint: 'fs', targets: [{ format: SCENE_FORMAT }] },
+      primitive: { topology: 'triangle-list' },
+    });
+    const siluModule = device.createShaderModule({ code: SILHOUETTE_SHADER });
+    const siluPipeline = device.createRenderPipeline({
+      layout: effectPipelineLayout,
+      vertex: { module: siluModule, entryPoint: 'vs' },
+      fragment: { module: siluModule, entryPoint: 'fs', targets: [{ format: SCENE_FORMAT }] },
+      primitive: { topology: 'triangle-list' },
+    });
+    const blurResources: CompositorResources = { pipeline: blurPipeline, layout: effectLayout };
+    const siluResources: CompositorResources = { pipeline: siluPipeline, layout: effectLayout };
+
     // --- vector-fill pipeline (analytic coverage -> layer target) ---
     const pathModule = device.createShaderModule({ code: PATH_SHADER });
     // The path shader reads the viewport in both stages (fragment needs the
@@ -1212,6 +1312,8 @@ export class WebGpuRenderer {
       imageResources,
       compositorResources,
       maskResources,
+      blurResources,
+      siluResources,
       pathResources,
       msdfResources,
       width,
@@ -1355,6 +1457,8 @@ export class WebGpuRenderer {
     const pad = 2; // AA margin, matching the vertex bbox pad
     let blendOps = 0;
     let maskOps = 0;
+    let blurOps = 0;
+    let siluOps = 0;
     for (const cmd of commands) {
       if (cmd.op === 'draw-solid') {
         const m = cmd.transform;
@@ -1416,6 +1520,15 @@ export class WebGpuRenderer {
       } else if (cmd.op === 'push-group') {
         blendOps++; // the matching pop composites the group (one blend pass)
         if (cmd.mask) maskOps++; // the pop also applies a clip/mask coverage pass
+        for (const e of cmd.effects ?? []) {
+          if (e.type === 'blur') {
+            blurOps += 2; // horizontal + vertical
+          } else {
+            siluOps += 1; // silhouette seed
+            blurOps += 2; // blur it
+            blendOps += 1; // composite the shadow/glow behind the layer
+          }
+        }
       }
     }
 
@@ -1450,6 +1563,7 @@ export class WebGpuRenderer {
     }
     this.ensureBlendParams(blendOps);
     this.ensureMaskParams(maskOps);
+    this.ensureEffectParams(blurOps, siluOps);
   }
 
   /**
@@ -1621,6 +1735,89 @@ export class WebGpuRenderer {
     this.maskParamsSlots = need;
   }
 
+  /** Ensure the blur/silhouette uniform buffers have one 256B slot per pass. */
+  private ensureEffectParams(blurSlots: number, siluSlots: number): void {
+    const nb = Math.max(1, blurSlots);
+    if (nb > this.blurParamsSlots) {
+      this.blurParamsBuffer.destroy();
+      this.blurParamsBuffer = this.device.createBuffer({
+        size: nb * 256,
+        usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+      });
+      this.blurParamsSlots = nb;
+    }
+    const ns = Math.max(1, siluSlots);
+    if (ns > this.siluParamsSlots) {
+      this.siluParamsBuffer.destroy();
+      this.siluParamsBuffer = this.device.createBuffer({
+        size: ns * 256,
+        usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+      });
+      this.siluParamsSlots = ns;
+    }
+  }
+
+  /** One separable Gaussian blur pass (horizontal or vertical). */
+  private blurPass(
+    encoder: GPUCommandEncoder,
+    dest: GPUTexture,
+    src: GPUTexture,
+    sigma: number,
+    taps: number,
+    dirX: number,
+    dirY: number,
+    slot: number
+  ): void {
+    const offset = slot * 256;
+    this.device.queue.writeBuffer(this.blurParamsBuffer, offset, new Float32Array([sigma, taps, dirX, dirY]));
+    const bindGroup = this.device.createBindGroup({
+      layout: this.blur.layout,
+      entries: [
+        { binding: 0, resource: src.createView() },
+        { binding: 1, resource: { buffer: this.blurParamsBuffer, offset, size: 16 } },
+      ],
+    });
+    const pass = encoder.beginRenderPass({
+      colorAttachments: [{ view: dest.createView(), loadOp: 'clear', storeOp: 'store', clearValue: { r: 0, g: 0, b: 0, a: 0 } }],
+    });
+    pass.setPipeline(this.blur.pipeline);
+    pass.setBindGroup(0, bindGroup);
+    pass.draw(3);
+    pass.end();
+  }
+
+  /** Render a tinted, optionally-offset silhouette of `src`'s alpha. */
+  private silhouettePass(
+    encoder: GPUCommandEncoder,
+    dest: GPUTexture,
+    src: GPUTexture,
+    color: { r: number; g: number; b: number; a: number },
+    offX: number,
+    offY: number,
+    slot: number
+  ): void {
+    const offset = slot * 256;
+    this.device.queue.writeBuffer(
+      this.siluParamsBuffer,
+      offset,
+      new Float32Array([color.r, color.g, color.b, color.a, offX, offY, 0, 0])
+    );
+    const bindGroup = this.device.createBindGroup({
+      layout: this.silhouette.layout,
+      entries: [
+        { binding: 0, resource: src.createView() },
+        { binding: 1, resource: { buffer: this.siluParamsBuffer, offset, size: 32 } },
+      ],
+    });
+    const pass = encoder.beginRenderPass({
+      colorAttachments: [{ view: dest.createView(), loadOp: 'clear', storeOp: 'store', clearValue: { r: 0, g: 0, b: 0, a: 0 } }],
+    });
+    pass.setPipeline(this.silhouette.pipeline);
+    pass.setBindGroup(0, bindGroup);
+    pass.draw(3);
+    pass.end();
+  }
+
   resize(width: number, height: number): void {
     this.width = Math.max(1, Math.floor(width));
     this.height = Math.max(1, Math.floor(height));
@@ -1674,6 +1871,8 @@ export class WebGpuRenderer {
     this.noiseTexture.destroy();
     this.blendParamsBuffer.destroy();
     this.maskParamsBuffer.destroy();
+    this.blurParamsBuffer.destroy();
+    this.siluParamsBuffer.destroy();
     this.pathParamsBuffer.destroy();
     this.edgeBuffer?.destroy();
     this.bandTableBuffer?.destroy();
@@ -1714,9 +1913,50 @@ export class WebGpuRenderer {
     let msdfCursor = 0;
     let blendSlot = 0;
     let maskSlot = 0;
+    let blurSlot = 0;
+    let siluSlot = 0;
     // Coverage targets captured by `pop-mask`, consumed by the next masked
     // `push-group` (LIFO — a push-group always follows its pop-mask).
     const pendingMasks: GPUTexture[] = [];
+
+    // Blur `src` (screen-space radius) along both axes; consumes `src`, returns
+    // a fresh target (or `src` unchanged when the radius rounds to nothing).
+    const blur2 = (src: GPUTexture, screenRadius: number): GPUTexture => {
+      const rDev = screenRadius * this.sampleScale;
+      const taps = Math.min(MAX_BLUR_TAPS, Math.ceil(rDev));
+      if (taps < 1) return src;
+      const sigma = Math.max(rDev / 3, 0.5);
+      const h = this.acquireTarget();
+      this.blurPass(encoder, h, src, sigma, taps, 1, 0, blurSlot++);
+      const v = this.acquireTarget();
+      this.blurPass(encoder, v, h, sigma, taps, 0, 1, blurSlot++);
+      this.releaseTarget(h);
+      this.releaseTarget(src);
+      return v;
+    };
+
+    // Apply a node's effect chain to its layer; consumes `input`, returns final.
+    const applyEffects = (input: GPUTexture, effects: readonly ScreenEffect[]): GPUTexture => {
+      let layer = input;
+      for (const e of effects) {
+        if (e.type === 'blur') {
+          layer = blur2(layer, e.radius);
+          continue;
+        }
+        // Drop shadow / outer glow: a blurred, tinted silhouette behind the layer.
+        const offX = e.type === 'drop-shadow' ? e.dx * this.sampleScale : 0;
+        const offY = e.type === 'drop-shadow' ? e.dy * this.sampleScale : 0;
+        const sil = this.acquireTarget();
+        this.silhouettePass(encoder, sil, layer, e.color, offX, offY, siluSlot++);
+        const halo = blur2(sil, e.radius);
+        const out = this.acquireTarget();
+        this.blendPass(encoder, out, halo, layer, 0, 1, blendSlot++); // layer over halo
+        this.releaseTarget(halo);
+        this.releaseTarget(layer);
+        layer = out;
+      }
+      return layer;
+    };
 
     // Consecutive Normal draws onto the same target share ONE render pass, so
     // the (large, supersampled) target is load+stored once per run rather than
@@ -1771,6 +2011,7 @@ export class WebGpuRenderer {
           mode: blendModeIndex(cmd.blend),
           maskTex,
           maskChannel: cmd.mask ? (cmd.mask.type === 'alpha' ? 1 : 0) : undefined,
+          effects: cmd.effects,
         });
         continue;
       }
@@ -1781,7 +2022,7 @@ export class WebGpuRenderer {
         if (!group || !parent) {
           continue;
         }
-        // Apply the clip/mask coverage to the group before it composites.
+        // Apply the clip/mask coverage, then effects, before it composites.
         let layer = group.tex;
         if (group.maskTex) {
           const masked = this.acquireTarget();
@@ -1789,6 +2030,9 @@ export class WebGpuRenderer {
           this.releaseTarget(layer);
           this.releaseTarget(group.maskTex);
           layer = masked;
+        }
+        if (group.effects && group.effects.length > 0) {
+          layer = applyEffects(layer, group.effects);
         }
         const dest = this.acquireTarget();
         this.blendPass(encoder, dest, parent.tex, layer, group.mode, group.opacity, blendSlot++);

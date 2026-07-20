@@ -306,4 +306,25 @@ describe('buildRenderList — clip & mask', () => {
     const cmds = buildRenderList(doc, createCamera());
     expect(cmds.map((c) => c.op)).toEqual(['draw-path']);
   });
+
+  it('wraps a node with effects in a group carrying screen-space effect params', () => {
+    const doc = newDoc();
+    doc.insert<PathNode>({
+      type: 'path',
+      name: 'p',
+      path: rectPath(0, 0, 100, 100),
+      fill: white,
+      effects: [{ type: 'drop-shadow', dx: 4, dy: 6, radius: 8, color: { r: 0, g: 0, b: 0, a: 1 } }],
+    });
+    const cmds = buildRenderList(doc, createCamera({ zoom: 2 }));
+    expect(cmds.map((c) => c.op)).toEqual(['push-group', 'draw-path', 'pop-group']);
+    const pg = cmds.find((c) => c.op === 'push-group');
+    if (pg?.op !== 'push-group' || !pg.effects) throw new Error('expected effects');
+    const e = pg.effects[0];
+    if (e.type !== 'drop-shadow') throw new Error('expected drop-shadow');
+    // zoom 2 doubles offset and radius (local -> screen).
+    expect(e.dx).toBeCloseTo(8);
+    expect(e.dy).toBeCloseTo(12);
+    expect(e.radius).toBeCloseTo(16);
+  });
 });
