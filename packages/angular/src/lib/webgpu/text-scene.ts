@@ -93,7 +93,9 @@ export function createTextScene(): SceneSource {
         { offset: 1, color: rgb(60, 110, 230) },
       ],
     },
-    stroke: { paint: { type: 'solid', color: rgb(14, 22, 44) }, width: 2.5, join: 'round' },
+    // Miter join: serif tips stay sharp. A round join would round every acute
+    // serif/terminal into a bead (a round join on a sharp corner is a half-disc).
+    stroke: { paint: { type: 'solid', color: rgb(14, 22, 44) }, width: 2.5, join: 'miter' },
   });
 
   // A paragraph auto-wrapped to a width box (greedy word-wrap), proving layout.
