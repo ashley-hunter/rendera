@@ -59,3 +59,30 @@ export function toMatrix(t: Transform): Mat2D {
     fromTranslation(negate(t.pivot))
   );
 }
+
+/**
+ * Decompose an arbitrary affine matrix into a pivot-free `Transform` such that
+ * `toMatrix(matrixToTransform(m))` reproduces `m`. The linear part factors as
+ * `R(θ)·K(skew)·S(scale)` (the same order `toMatrix` composes), so translation
+ * is the matrix's `(e, f)`, `θ = atan2(b, a)`, `scale.x = |(a, b)|`, and the
+ * shear/`scale.y` fall out of the rotation-removed second column. A reflection
+ * (negative determinant) lands in a negative `scale.y`. This is how SVG's baked
+ * `matrix(...)`/composed transform lists become node transforms.
+ */
+export function matrixToTransform(m: Mat2D): Transform {
+  const sx = Math.hypot(m.a, m.b);
+  const rotation = Math.atan2(m.b, m.a);
+  const cos = Math.cos(rotation);
+  const sin = Math.sin(rotation);
+  // Second column with the rotation rotated out: [c', d'] = R(-θ)·[c, d].
+  const cPrime = cos * m.c + sin * m.d;
+  const dPrime = -sin * m.c + cos * m.d;
+  return {
+    translation: vec2(m.e, m.f),
+    rotation,
+    // tan(skew) = c'/d'; atan2 keeps that ratio exact through `fromSkew`.
+    skew: Math.atan2(cPrime, dPrime),
+    scale: vec2(sx, dPrime),
+    pivot: ZERO,
+  };
+}
