@@ -82,3 +82,12 @@ otherwise shatter a glyph into dozens of fragments — stroking those fragments
 drew a chaotic mess across the letters — and a very large path would miss
 intersections. A scale-invariance test asserts identical topology and fill for a
 glyph at 0.04×, 1×, and 25×.
+
+Normalizing by the *whole path's* bounds is still not enough on its own: a text
+line normalizes by the line width, so each glyph is only a small fraction of the
+working scale — a mid-line `r` mis-resolved into spurious diagonal edges its
+stroke then drew across the letter. But overlaps only ever occur *within* a
+connected shape (a glyph and its counters), never between separate glyphs. So
+`resolveOverlaps` first splits the path into **bbox-connected clusters** and
+resolves each at its *own* scale, then concatenates. A per-line test confirms the
+fill of every glyph in "Vector Type" is preserved.

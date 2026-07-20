@@ -285,8 +285,27 @@ export function booleanPath(a: Path, b: Path, op: BooleanOp): Path {
  * done at a normalized ~1000-unit scale and mapped back — otherwise a small path
  * (e.g. em-scaled text at ~40 units) would shatter into fragments, and a huge one
  * would miss intersections.
+ *
+ * Overlaps only ever occur *within* a connected shape (a glyph and its counters);
+ * separate shapes never interact. So the path is first split into bbox-connected
+ * clusters and each is resolved at ITS OWN scale — otherwise a whole text line
+ * normalizes by the line width, leaving each glyph too small at the working scale
+ * (a mid-line 'r' mis-resolved into spurious diagonal edges its stroke then drew).
  */
 export function resolveOverlaps(path: Path): Path {
+  const clusters = clusterSubpaths(path);
+  if (clusters.length <= 1) {
+    return resolveConnected(path);
+  }
+  const subpaths: SubPath[] = [];
+  for (const c of clusters) {
+    subpaths.push(...resolveConnected(c).subpaths);
+  }
+  return { subpaths };
+}
+
+/** Resolve one connected shape, normalized to a ~1000-unit working scale. */
+function resolveConnected(path: Path): Path {
   const b = pathBoundsLocal(path);
   if (!b) return path;
   const diag = Math.hypot(b.maxX - b.minX, b.maxY - b.minY);
@@ -296,6 +315,38 @@ export function resolveOverlaps(path: Path): Path {
   const scaled = transformPath(path, { a: k, b: 0, c: 0, d: k, e: 0, f: 0 });
   const out = resolveOverlapsCore(scaled);
   return transformPath(out, { a: 1 / k, b: 0, c: 0, d: 1 / k, e: 0, f: 0 });
+}
+
+/** Group subpaths whose bounding boxes connect (a glyph + its counters); disjoint
+ * groups (separate glyphs) become separate clusters. */
+function clusterSubpaths(path: Path): Path[] {
+  const subs = path.subpaths;
+  const n = subs.length;
+  if (n <= 1) return [path];
+  const boxes = subs.map((sp) => pathBoundsLocal({ subpaths: [sp] }));
+  const parent = Array.from({ length: n }, (_, i) => i);
+  const find = (i: number): number => {
+    while (parent[i] !== i) {
+      parent[i] = parent[parent[i]];
+      i = parent[i];
+    }
+    return i;
+  };
+  for (let i = 0; i < n; i++) {
+    for (let j = i + 1; j < n; j++) {
+      const a = boxes[i];
+      const c = boxes[j];
+      if (a && c && a.minX <= c.maxX && c.minX <= a.maxX && a.minY <= c.maxY && c.minY <= a.maxY) {
+        parent[find(i)] = find(j);
+      }
+    }
+  }
+  const groups = new Map<number, SubPath[]>();
+  for (let i = 0; i < n; i++) {
+    const r = find(i);
+    (groups.get(r) ?? groups.set(r, []).get(r)!).push(subs[i]);
+  }
+  return [...groups.values()].map((subpaths) => ({ subpaths }));
 }
 
 function resolveOverlapsCore(path: Path): Path {

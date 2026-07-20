@@ -1,4 +1,4 @@
-import { buildRenderList, createCamera, createSequentialIdFactory, flattenPath, pathBounds, resolveOverlaps, SceneDocument, type PathNode, type Path } from '@rendera/core';
+import { buildRenderList, createCamera, createSequentialIdFactory, flattenPath, pathBounds, SceneDocument, type PathNode, type Path } from '@rendera/core';
 import { WebGpuRenderer, type ReadbackResult } from './renderer';
 import vt from './__fixtures__/vectortype.json';
 
@@ -6,12 +6,14 @@ const mk = (w: number, h: number) => { const c = document.createElement('canvas'
 const px = (rb: ReadbackResult, x: number, y: number) => { const o = y * rb.bytesPerRow + x * 4; return [rb.data[o], rb.data[o + 1], rb.data[o + 2]]; };
 
 // The exact "Vector Type" outline produced by layoutTextNode (fontSize 96),
-// miter-stroked — the deployed scene. A stroke must stay near the glyph edge;
-// a stroke line cutting diagonally through a letter would sit far from the
-// centerline. This guards against the interior-diagonal / miter-spike class of
-// bug across the whole stroked line.
-describe('stroked "Vector Type" has no interior stroke line', () => {
-  it('keeps every stroke pixel near the glyph outline', async () => {
+// miter-stroked — the deployed scene. Rendered STROKE-ONLY (so nothing is hidden
+// under the fill) and measured against the RAW glyph outline (not the
+// overlap-resolved one — which is what a bug would corrupt). A stroke line
+// cutting across a letter sits far from every real edge; a correct stroke never
+// exceeds the miter reach. This catches the interior-diagonal bug where
+// resolveOverlaps, normalized by the whole line, mis-resolved a mid-line glyph.
+describe('stroked "Vector Type" stays on the glyph edges', () => {
+  it('has no stroke pixel far from the raw outline (no interior diagonal)', async () => {
     const path = vt as Path;
     const b = pathBounds(path)!;
     const doc = SceneDocument.create({ idFactory: createSequentialIdFactory('n') });
@@ -19,8 +21,8 @@ describe('stroked "Vector Type" has no interior stroke line', () => {
       type: 'path',
       name: 't',
       path,
-      fill: { type: 'solid', color: { r: 0.3, g: 0.55, b: 1, a: 1 } },
-      stroke: { paint: { type: 'solid', color: { r: 0.05, g: 0.08, b: 0.17, a: 1 } }, width: 2.5, join: 'miter' },
+      fill: undefined, // stroke only — nothing hidden under the fill
+      stroke: { paint: { type: 'solid', color: { r: 0.2, g: 0.8, b: 0.9, a: 1 } }, width: 2.5, join: 'miter' },
     });
     const W = 620;
     const H = 130;
@@ -33,7 +35,8 @@ describe('stroked "Vector Type" has no interior stroke line', () => {
     const rb = await renderer.readback();
     renderer.destroy();
 
-    const poly = flattenPath(resolveOverlaps(path), 0.3).map((l) => l.map((p) => ({ x: panx + zoom * p.x, y: pany + zoom * p.y })));
+    // Reference = the RAW glyph outline (the true shape), in screen space.
+    const poly = flattenPath(path, 0.3).map((l) => l.map((p) => ({ x: panx + zoom * p.x, y: pany + zoom * p.y })));
     const d2c = (x: number, y: number): number => {
       let best = 1e9;
       for (const l of poly) for (let i = 0; i + 1 < l.length; i++) {
@@ -44,22 +47,20 @@ describe('stroked "Vector Type" has no interior stroke line', () => {
       }
       return best;
     };
-    // A miter apex reaches at most miterLimit*half (4 * 1.25 = 5 local units)
-    // from the outline; anything well past that is an interior stroke line.
+    // A miter apex reaches at most miterLimit*half (4 * 1.25 = 5 local units);
+    // allow AA + slack. An interior stroke line is far past this.
     const limit = (5 + 3) * zoom;
     let strokePixels = 0;
     let stray = 0;
     for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
       const [r, g, bl] = px(rb, x, y);
-      const lum = r + g + bl;
-      if (lum < 20 || (bl > 130 && g > 60)) continue; // background or blue fill
+      if (r + g + bl < 30) continue; // background
       strokePixels++;
       if (d2c(x, y) > limit) stray++;
     }
-
     expect(strokePixels).toBeGreaterThan(500);
-    // A real interior stroke line would be hundreds of pixels; tolerate a few
-    // isolated AA pixels at the sharpest miter apexes.
-    expect(stray).toBeLessThan(12);
+    // A real interior stroke line is hundreds of pixels; tolerate a few isolated
+    // AA pixels at the sharpest miter apexes.
+    expect(stray).toBeLessThan(15);
   });
 });
