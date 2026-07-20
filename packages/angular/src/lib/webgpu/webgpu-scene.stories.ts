@@ -3,6 +3,7 @@ import { createBlendScene } from './blend-scene';
 import { createBooleanScene } from './boolean-scene';
 import { createGradientScene } from './gradient-scene';
 import { createImageSceneSource } from './image-scene';
+import { createSvgScene } from './svg-scene';
 import { createTextScene } from './text-scene';
 import { createVectorScene } from './vector-scene';
 import { WebGpuScene } from './webgpu-scene';
@@ -76,4 +77,17 @@ export const Text: Story = {
  */
 export const Booleans: Story = {
   args: { scene: createBooleanScene() },
+};
+
+/**
+ * A whole SVG illustration — imported, not hand-built (ADR 0010). One embedded
+ * `<svg>` string is parsed by the owned, dependency-free, DOM-free importer and
+ * lowered to analytic vector nodes: linear + radial gradients resolved in each
+ * shape's local space, cubic/quadratic/smooth Béziers and an elliptical arc,
+ * grouped strokes, a rotated group of sun rays, and an even-odd cut-out. Because
+ * it becomes the same vector geometry as everything else, zoom in — the entire
+ * scene stays razor-sharp.
+ */
+export const SvgImport: Story = {
+  args: { scene: createSvgScene() },
 };

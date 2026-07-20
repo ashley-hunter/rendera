@@ -146,6 +146,12 @@ so backend tests do **pixel readback** to assert colour correctness.
   non-destructive `boolean` node (operands stay editable, nests). The combined
   outline is strokable and hit-testable. *(General-position; degenerate overlaps
   are a follow-up.)*
+- ✅ **SVG import (ADR 0010):** an owned, dependency-free, **DOM-free** importer
+  (`importSvg`) — the full `d` path grammar (arcs → cubics), shapes, groups +
+  transforms, `viewBox` mapping, solid + gradient paints resolved in local space,
+  and text — lowered to the same analytic vector nodes, so imported art stays
+  resolution-independent and editable. Styled by presentation attributes + inline
+  `style=`. *(Full CSS cascade, filters, patterns, clip/mask are follow-ups.)*
 
 ## Phase 6 — Effects & non-destructive stack  ⬜  → `@rendera/effects`
 
@@ -157,8 +163,9 @@ so backend tests do **pixel readback** to assert colour correctness.
 
 ## Phase 7 — Import / export & document format  ⬜  → `@rendera/io`
 
-- **Import:** PNG (8/16-bit), JPEG (4:4:4), WebP, AVIF, **SVG as vector**; honour
-  embedded ICC / assume sRGB; matrix known profiles into working space.
+- **Import:** PNG (8/16-bit), JPEG (4:4:4), WebP, AVIF; honour embedded ICC /
+  assume sRGB; matrix known profiles into working space. (**SVG as vector** ✅
+  shipped early in Phase 5 — ADR 0010.)
 - **Export:** tag output profile always; tiled export beyond max texture size;
   quality controls (chroma subsampling, bit depth).
 - **Document format:** versioned zip container (manifest + per-layer tiles +
