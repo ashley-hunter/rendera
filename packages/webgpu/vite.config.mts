@@ -19,6 +19,11 @@ const CHROMIUM_WEBGPU_ARGS = [
 export default defineConfig(() => ({
   root: import.meta.dirname,
   cacheDir: '../../node_modules/.vite/packages/webgpu',
+  // Serve harfbuzzjs's .wasm, which lives in a sibling package's node_modules
+  // (outside this project root), from source during tests.
+  server: {
+    fs: { allow: [path.join(import.meta.dirname, '../..')] },
+  },
   plugins: [
     nxViteTsPaths(),
     nxCopyAssetsPlugin(['*.md']),
@@ -54,6 +59,13 @@ export default defineConfig(() => ({
       // External packages that should not be bundled into your library.
       external: [],
     },
+  },
+  // HarfBuzz (harfbuzzjs) locates its .wasm relative to `import.meta.url`; the
+  // esbuild dep-optimizer rewrites that and the wasm 404s. Excluding just it
+  // keeps it served from source so the wasm resolves. (bidi-js/unicode-properties
+  // stay optimized — they're CJS/ESM interop that the optimizer must convert.)
+  optimizeDeps: {
+    exclude: ['harfbuzzjs'],
   },
   test: {
     name: 'webgpu',

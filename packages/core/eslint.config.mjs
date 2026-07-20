@@ -37,7 +37,11 @@ export default [
           "ignoredFiles": [
             "{projectRoot}/eslint.config.{js,cjs,mjs,ts,cts,mts}",
             "{projectRoot}/vite.config.{js,ts,mjs,mts}"
-          ]
+          ],
+          // harfbuzzjs is loaded via a lazy dynamic `import()` (so the wasm only
+          // costs consumers who use text) and unicode-properties is reached
+          // through a typed shim — neither is visible to the static dep graph.
+          "ignoredDependencies": ["harfbuzzjs", "unicode-properties"]
         }
       ]
     },

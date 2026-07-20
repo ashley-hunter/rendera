@@ -4,14 +4,18 @@ import {
   createSequentialIdFactory,
   createTransform,
   ellipsePath,
+  layoutTextNode,
   rectPath,
+  RenderaFont,
   SceneDocument,
   vec2,
   type GroupNode,
   type ImageNode,
   type LayerNode,
   type PathNode,
+  type TextNode,
 } from '@rendera/core';
+import fontUrl from './__fixtures__/CrimsonPro-Regular.ttf?url';
 import { encode8, linearToSrgb, srgbToLinear } from './color';
 import { WebGpuRenderer, type ReadbackResult } from './renderer';
 
@@ -595,6 +599,39 @@ describe('WebGpuRenderer colour pipeline', () => {
     // The centre is (near) white; a point ~2/3 out toward the rim is much darker.
     expect(pixel(rb, 32, 32).r).toBeGreaterThan(230);
     expect(pixel(rb, 53, 32).r).toBeLessThan(pixel(rb, 32, 32).r - 60);
+  });
+
+  it('shapes and renders text as analytic glyph outlines (wasm in the browser)', async () => {
+    const data = await fetch(fontUrl).then((r) => r.arrayBuffer());
+    const font = await RenderaFont.load(data);
+    const doc = SceneDocument.create({ idFactory: createSequentialIdFactory('n') });
+    const node = doc.insert<TextNode>({
+      type: 'text',
+      name: 't',
+      text: 'Ag',
+      fontId: 'crimson',
+      fontSize: 40,
+      fill: { type: 'solid', color: { r: 1, g: 1, b: 1, a: 1 } },
+      transform: createTransform({ translation: vec2(4, 4) }),
+    });
+    const layout = layoutTextNode(font, node);
+    // Layout produced real glyph geometry.
+    expect(layout.path.subpaths.length).toBeGreaterThan(2);
+    const textPaths = new Map([[node.id, layout.path]]);
+
+    const renderer = await WebGpuRenderer.create(makeCanvas(64), { colorSpace: 'srgb', dither: false });
+    renderer.setClearColor({ r: 0, g: 0, b: 0, a: 1 });
+    renderer.setRenderList(buildRenderList(doc, createCamera(), { textPaths }));
+    const rb = await renderer.readback();
+
+    // Glyph ink: white-ish coverage pixels present, background stays black.
+    let ink = 0;
+    for (let i = 0; i < rb.data.length; i += 4) {
+      if (rb.data[i] > 180 && rb.data[i + 1] > 180 && rb.data[i + 2] > 180) ink++;
+    }
+    expect(ink).toBeGreaterThan(30);
+    expect(Math.max(pixel(rb, 1, 1).r, pixel(rb, 1, 1).g, pixel(rb, 1, 1).b)).toBeLessThan(20);
+    renderer.destroy();
   });
 
   // NOTE: the on-screen canvas *swapchain* present cannot be verified here —

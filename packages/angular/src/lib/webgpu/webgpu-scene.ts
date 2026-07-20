@@ -11,13 +11,18 @@ import {
   buildRenderList,
   createCamera,
   fitBounds,
+  layoutTextNode,
   panBy,
+  RenderaFont,
   vec2,
   ViewportGesture,
   withPixelRatio,
   zoomAround,
   type Camera,
+  type NodeId,
+  type Path,
   type SceneDocument,
+  type TextNode,
   type Vec2,
   type ViewportGestureChange,
 } from '@rendera/core';
@@ -34,15 +39,24 @@ interface ClearColor {
   a: number;
 }
 
+/** A font to load for the scene's text nodes: an id plus bytes (or a URL). */
+export interface FontSource {
+  /** Matches a `TextNode`'s `fontId`. */
+  readonly id: string;
+  /** Font bytes, or a URL to fetch them from (raw `.ttf`/`.otf`). */
+  readonly src: string | ArrayBuffer;
+}
+
 /**
- * What to render: a document, an optional initial camera and clear colour, and
- * an async `setup` hook that runs once after the device is ready (e.g. to
- * register image assets on the renderer before the first draw).
+ * What to render: a document, an optional initial camera and clear colour, an
+ * async `setup` hook that runs once after the device is ready (e.g. to register
+ * image assets), and any `fonts` whose glyphs the scene's text nodes need.
  */
 export interface SceneSource {
   readonly document: SceneDocument;
   readonly camera?: Camera;
   readonly clearColor?: ClearColor;
+  readonly fonts?: readonly FontSource[];
   setup?(renderer: WebGpuRenderer): void | Promise<void>;
 }
 
@@ -68,6 +82,8 @@ export class WebGpuScene {
   readonly scene = input<SceneSource | null>(null);
 
   private document: SceneDocument = createSampleDocument();
+  /** Shaped, local-space glyph outlines per text node (async; empty until ready). */
+  private textPaths: ReadonlyMap<NodeId, Path> = new Map();
   private readonly camera = signal<Camera>(createCamera({ pan: vec2(20, 20) }));
   private renderer: WebGpuRenderer | null = null;
   private resizeObserver?: ResizeObserver;
@@ -115,8 +131,9 @@ export class WebGpuScene {
         supersample: 2,
       });
       this.renderer.setClearColor(source?.clearColor ?? { r: 0.02, g: 0.02, b: 0.03, a: 1 });
-      // Register image assets (etc.) before the first draw.
+      // Register image assets (etc.) and shape any text before the first draw.
       await source?.setup?.(this.renderer);
+      await this.prepareText(source);
       this.renderState.set('ready');
       if (typeof ResizeObserver !== 'undefined') {
         this.resizeObserver = new ResizeObserver(() => this.onResize());
@@ -137,6 +154,43 @@ export class WebGpuScene {
   private fail(message: string): void {
     this.renderState.set('unsupported');
     this.message.set(message);
+  }
+
+  /**
+   * Load the scene's fonts and shape its text nodes into local-space glyph
+   * outlines (HarfBuzz; the wasm loads lazily on first font). Runs once before
+   * the first draw. Each shaped node's `size` is filled in so world bounds (and
+   * fit-to-content framing) work.
+   */
+  private async prepareText(source: SceneSource | null): Promise<void> {
+    if (!source?.fonts?.length) {
+      return;
+    }
+    const fonts = new Map<string, RenderaFont>();
+    for (const font of source.fonts) {
+      const data =
+        typeof font.src === 'string'
+          ? await fetch(font.src).then((r) => r.arrayBuffer())
+          : font.src;
+      fonts.set(font.id, await RenderaFont.load(data));
+    }
+    const paths = new Map<NodeId, Path>();
+    for (const node of this.document) {
+      if (node.type !== 'text') {
+        continue;
+      }
+      const text = node as TextNode;
+      const font = fonts.get(text.fontId);
+      if (!font) {
+        continue;
+      }
+      const layout = layoutTextNode(font, text);
+      paths.set(node.id, layout.path);
+      if (!text.size) {
+        this.document.update(node.id, { size: vec2(layout.width, layout.height) });
+      }
+    }
+    this.textPaths = paths;
   }
 
   protected fit(): void {
@@ -278,7 +332,9 @@ export class WebGpuScene {
     // Build the render list in device pixels (logical camera scaled by DPR) so
     // geometry lands on the full-resolution backing store.
     const camera = withPixelRatio(this.camera(), this.pixelRatio());
-    this.renderer.setRenderList(buildRenderList(this.document, camera));
+    this.renderer.setRenderList(
+      buildRenderList(this.document, camera, { textPaths: this.textPaths })
+    );
     this.renderer.render();
     this.recordFrame();
   }

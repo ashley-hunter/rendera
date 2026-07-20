@@ -2,6 +2,7 @@ import type { Meta, StoryObj } from '@storybook/angular';
 import { createBlendScene } from './blend-scene';
 import { createGradientScene } from './gradient-scene';
 import { createImageSceneSource } from './image-scene';
+import { createTextScene } from './text-scene';
 import { createVectorScene } from './vector-scene';
 import { WebGpuScene } from './webgpu-scene';
 
@@ -52,4 +53,14 @@ export const Vectors: Story = {
  */
 export const Gradients: Story = {
   args: { scene: createGradientScene() },
+};
+
+/**
+ * High-fidelity text: real HarfBuzz shaping (ligatures like fi/ffl, kerning like
+ * AV/To) with glyph outlines fed through the analytic vector fill — so type is
+ * resolution-independent (zoom in, it stays razor sharp) and paints with solid
+ * colour, gradients, and strokes like any other vector shape.
+ */
+export const Text: Story = {
+  args: { scene: createTextScene() },
 };

@@ -16,6 +16,7 @@ import type { BlendMode } from './blend';
 import type { Paint } from './paint';
 import type { FillRule, Path } from './path';
 import type { StrokeCap, StrokeJoin } from './stroke';
+import type { TextAlign, TextDirection } from './text/layout';
 import type { Transform } from './transform';
 import type { OrderKey } from './ordering';
 import type { NodeId } from './id';
@@ -124,8 +125,46 @@ export interface PathNode extends SpatialNode {
   stroke?: Stroke;
 }
 
+/**
+ * A text node: a `text` string laid out with a registered font (`fontId`) and
+ * painted like a path. Shaping (HarfBuzz) turns it into glyph outlines that flow
+ * through the analytic vector fill, so it's resolution-independent and can carry
+ * a solid/gradient fill and a stroke. Layout is computed out-of-band (it's async
+ * — the font's wasm loads lazily) and supplied to `buildRenderList`.
+ */
+export interface TextNode extends SpatialNode {
+  readonly type: 'text';
+  name: string;
+  /** The text to render (`\n` breaks lines). */
+  text: string;
+  /** Id of a font registered with the layout provider. */
+  fontId: string;
+  /** Em size in local px. */
+  fontSize: number;
+  /** How the glyphs are painted (default: opaque mid-grey solid). */
+  fill?: Fill;
+  /** Winding rule for the fill (default `'nonzero'`). */
+  fillRule?: FillRule;
+  /** An optional outline stroke, painted over the fill. */
+  stroke?: Stroke;
+  /** Horizontal alignment (default `left`). */
+  align?: TextAlign;
+  /** Base paragraph direction (default `auto`). */
+  direction?: TextDirection;
+  /** Extra advance between glyphs in px. */
+  letterSpacing?: number;
+  /** Baseline-to-baseline distance in px (default from font metrics). */
+  lineHeight?: number;
+  /** BCP-47 language for language-specific shaping. */
+  language?: string;
+  /** OpenType feature toggles, e.g. `['dlig', 'ss01']`. */
+  features?: readonly string[];
+  /** Optional explicit block extent for bounds/hit-testing (top-left origin). */
+  size?: Vec2;
+}
+
 /** The built-in node types known to the default registry. */
-export type KnownNode = DocumentNode | GroupNode | LayerNode | ImageNode | PathNode;
+export type KnownNode = DocumentNode | GroupNode | LayerNode | ImageNode | PathNode | TextNode;
 
 /**
  * The fields a caller supplies when inserting a node. `id`/`parentId`/`index`

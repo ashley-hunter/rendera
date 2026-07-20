@@ -20,7 +20,7 @@ import { worldToScreenMatrix, type Camera } from './camera';
 import type { SceneDocument } from './document';
 import type { NodeId } from './id';
 import { compose, fromScaling, fromTranslation, invert, IDENTITY, type Mat2D } from './matrix';
-import type { GroupNode, ImageNode, LayerNode, PathNode, SpatialNode } from './node';
+import type { GroupNode, ImageNode, LayerNode, PathNode, SpatialNode, Stroke, TextNode } from './node';
 import type { Paint } from './paint';
 import {
   pathBounds,
@@ -28,6 +28,7 @@ import {
   toQuadraticPath,
   transformPath,
   type FillRule,
+  type Path,
   type PathEdge,
 } from './path';
 import { strokePath } from './stroke';
@@ -115,10 +116,89 @@ export type RenderCommand =
 /** The fill used for a layer that has none set (opaque mid-grey). */
 const DEFAULT_FILL: LinearRgba = { r: 0.5, g: 0.5, b: 0.5, a: 1 };
 
+/** Options for `buildRenderList`. */
+export interface BuildRenderListOptions {
+  /**
+   * Pre-computed local-space glyph outlines per text node, keyed by node id.
+   * Text shaping is async (the font's wasm loads lazily), so it happens
+   * out-of-band; a text node with no entry here emits nothing (not yet laid
+   * out).
+   */
+  readonly textPaths?: ReadonlyMap<NodeId, Path>;
+}
+
 /** Flatten the drawable nodes of `doc` into a compositing command stream. */
-export function buildRenderList(doc: SceneDocument, camera: Camera): RenderCommand[] {
+export function buildRenderList(
+  doc: SceneDocument,
+  camera: Camera,
+  options: BuildRenderListOptions = {}
+): RenderCommand[] {
   const commands: RenderCommand[] = [];
   const worldToScreen = worldToScreenMatrix(camera);
+
+  /**
+   * Emit fill + stroke draw-path commands for a vector shape given in the
+   * node's local space. Shared by path nodes and (shaped) text nodes: transform
+   * to screen, convert cubics to quadratics at sub-pixel tolerance, and pass the
+   * screen->local matrix so gradient paint evaluates in local space.
+   */
+  const emitVector = (
+    id: NodeId,
+    localPath: Path,
+    fill: Paint | undefined,
+    stroke: Stroke | undefined,
+    fillRule: FillRule,
+    screenMat: Mat2D,
+    opacity: number,
+    blend: BlendMode
+  ): void => {
+    const screenPath = toQuadraticPath(transformPath(localPath, screenMat), 0.1);
+    const screenToLocal = invert(screenMat) ?? IDENTITY;
+
+    if (fill || !stroke) {
+      const bounds = pathBounds(screenPath);
+      const edges = pathEdges(screenPath);
+      if (bounds && edges.length > 0) {
+        commands.push({
+          op: 'draw-path',
+          nodeId: id,
+          paint: fill ?? { type: 'solid', color: DEFAULT_FILL },
+          screenToLocal,
+          fillRule,
+          opacity,
+          blend,
+          edges,
+          bounds,
+        });
+      }
+    }
+
+    if (stroke) {
+      const det = screenMat.a * screenMat.d - screenMat.b * screenMat.c;
+      const scaleFactor = Math.sqrt(Math.abs(det)) || 1;
+      const outline = strokePath(screenPath, {
+        width: stroke.width * scaleFactor,
+        cap: stroke.cap,
+        join: stroke.join,
+        miterLimit: stroke.miterLimit,
+      });
+      const bounds = pathBounds(outline);
+      const edges = pathEdges(outline);
+      if (bounds && edges.length > 0) {
+        commands.push({
+          op: 'draw-path',
+          nodeId: id,
+          paint: stroke.paint,
+          screenToLocal,
+          fillRule: 'nonzero',
+          opacity,
+          blend,
+          edges,
+          bounds,
+        });
+      }
+    }
+  };
 
   const visit = (id: NodeId): void => {
     const node = doc.get(id) as SpatialNode | undefined;
@@ -147,62 +227,19 @@ export function buildRenderList(doc: SceneDocument, camera: Camera): RenderComma
 
     if (node.type === 'path') {
       const path = node as PathNode;
-      // Bake local -> world -> screen into the geometry, then convert cubics to
-      // quadratics at a sub-pixel *screen* tolerance so curves stay exact at zoom.
       const screenMat = compose(worldToScreen, doc.getWorldMatrix(id));
-      const screenPath = toQuadraticPath(transformPath(path.path, screenMat), 0.1);
-      // Gradient geometry is authored in local space; the backend maps each
-      // screen pixel back through this inverse to evaluate the ramp.
-      const screenToLocal = invert(screenMat) ?? IDENTITY;
+      emitVector(id, path.path, path.fill, path.stroke, path.fillRule ?? 'nonzero', screenMat, opacity, blend);
+      return;
+    }
 
-      // Fill (also the default when a path has neither fill nor stroke).
-      if (path.fill || !path.stroke) {
-        const bounds = pathBounds(screenPath);
-        const edges = pathEdges(screenPath);
-        if (bounds && edges.length > 0) {
-          const paint: Paint = path.fill ?? { type: 'solid', color: DEFAULT_FILL };
-          commands.push({
-            op: 'draw-path',
-            nodeId: id,
-            paint,
-            screenToLocal,
-            fillRule: path.fillRule ?? 'nonzero',
-            opacity,
-            blend,
-            edges,
-            bounds,
-          });
-        }
-      }
-
-      // Stroke: convert the outline (screen-space width) and fill it nonzero.
-      // The stroke's paint (solid or gradient) stays in local space, so it uses
-      // the same `screenToLocal` as the fill.
-      if (path.stroke) {
-        const s = path.stroke;
-        const det = screenMat.a * screenMat.d - screenMat.b * screenMat.c;
-        const scaleFactor = Math.sqrt(Math.abs(det)) || 1;
-        const outline = strokePath(screenPath, {
-          width: s.width * scaleFactor,
-          cap: s.cap,
-          join: s.join,
-          miterLimit: s.miterLimit,
-        });
-        const bounds = pathBounds(outline);
-        const edges = pathEdges(outline);
-        if (bounds && edges.length > 0) {
-          commands.push({
-            op: 'draw-path',
-            nodeId: id,
-            paint: s.paint,
-            screenToLocal,
-            fillRule: 'nonzero',
-            opacity,
-            blend,
-            edges,
-            bounds,
-          });
-        }
+    if (node.type === 'text') {
+      const text = node as TextNode;
+      // The shaped, local-space glyph outlines are supplied out-of-band (async
+      // shaping). No layout yet -> nothing to draw.
+      const localPath = options.textPaths?.get(id);
+      if (localPath && localPath.subpaths.length > 0) {
+        const screenMat = compose(worldToScreen, doc.getWorldMatrix(id));
+        emitVector(id, localPath, text.fill, text.stroke, text.fillRule ?? 'nonzero', screenMat, opacity, blend);
       }
       return;
     }

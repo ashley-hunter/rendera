@@ -11,7 +11,7 @@
  */
 
 import { boundsFromRect, type Bounds } from './bounds';
-import type { ImageNode, LayerNode, PathNode, SceneNode } from './node';
+import type { ImageNode, LayerNode, PathNode, SceneNode, TextNode } from './node';
 import { pathBounds, pointInPath } from './path';
 import { IDENTITY_TRANSFORM } from './transform';
 import { type Vec2, ZERO } from './vec2';
@@ -126,6 +126,23 @@ const pathUtil: NodeUtil = {
   },
 };
 
+const textUtil: NodeUtil = {
+  type: 'text',
+  canHaveChildren: () => false,
+  isSpatial: () => true,
+  createDefaults: () => ({ transform: IDENTITY_TRANSFORM }),
+  // The block extent is only known after async shaping; if the author set an
+  // explicit `size` we use it, else the node has no local bounds yet.
+  getLocalBounds: (node) => {
+    const { size } = node as TextNode;
+    return size ? boundsFromRect(0, 0, size.x, size.y) : null;
+  },
+  hitTestLocal: (node, p) => {
+    const { size } = node as TextNode;
+    return size ? p.x >= 0 && p.y >= 0 && p.x <= size.x && p.y <= size.y : false;
+  },
+};
+
 /** A registry pre-populated with the built-in node types. */
 export function createDefaultRegistry(): NodeRegistry {
   return new NodeRegistry()
@@ -133,5 +150,6 @@ export function createDefaultRegistry(): NodeRegistry {
     .register(groupUtil)
     .register(layerUtil)
     .register(imageUtil)
-    .register(pathUtil);
+    .register(pathUtil)
+    .register(textUtil);
 }

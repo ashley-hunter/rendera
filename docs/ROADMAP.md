@@ -130,7 +130,12 @@ so backend tests do **pixel readback** to assert colour correctness.
   spread, and per-gradient linear-light **or OKLab** interpolation. Authored in
   local space, so a gradient transforms exactly with its shape; fills and strokes
   both carry it. (ADR 0007 follow-up.) *(Boolean ops still to come.)*
-- ⬜ **Text:** MSDF atlas for zoomable UI text + a high-quality path for large/display type.
+- ✅ **Text (ADR 0008):** real **HarfBuzz** (WASM) shaping — ligatures, kerning,
+  GPOS/GSUB, bidi (UAX #9) + script itemization (UAX #24) — with glyph **outlines**
+  fed through the analytic fill, so type is resolution-independent and paints with
+  solid colour, gradients, and strokes like any vector. A `text` node + font
+  loading + layout live in DOM-free `@rendera/core` (wasm lazy-loaded). *(MSDF
+  atlas for dense small text, line wrapping, and colour glyphs are follow-ups.)*
 - ⬜ **Boolean ops** (union / intersect / difference on paths).
 
 ## Phase 6 — Effects & non-destructive stack  ⬜  → `@rendera/effects`
