@@ -91,9 +91,21 @@ vector fill.**
   features that the resolution-independent outline avoids. Small/dense text stays
   cheap; deep zoom stays crisp. Stroked/large display text always uses the
   outline. MSDF correctness is proven by reconstructing coverage from the field
-  and matching the analytic fill (>97% away from the AA band). Deferred:
-  msdfgen's error-correction pass (would extend MSDF's usable magnification), a
+  and matching the analytic fill (>97% away from the AA band). Deferred: a
   worker for baking, multi-font atlases.
+- **Follow-up: error correction.** Once a glyph feature narrows to about one
+  texel (small on-screen text, or a heavily minified atlas), two channels can
+  swap order across a texel gap — bilinear sampling then reconstructs a median
+  that crosses the edge threshold *twice*, painting a one-texel hole inside the
+  glyph (or a nub outside it) at apexes, serif tips, and stem/crossbar
+  junctions. `generateGlyphMsdf` now runs an msdfgen-style correction pass on the
+  baked field: any texel whose interpolation to a 4-neighbour would produce such
+  a false crossing (both texels agreeing on inside/outside, yet the interpolated
+  median crossing anyway) is collapsed to a single channel — locally a plain SDF,
+  which cannot clash — leaving every genuinely-sharp corner (where MSDF is
+  correct) untouched. A regression test counts these false edges directly across
+  a range of sharp glyphs and small atlas sizes: hundreds without the pass, zero
+  with it, and the >97% coverage-agreement check confirms corners survive.
 - Licensing: HarfBuzz (Old MIT), `bidi-js`/`unicode-properties` (MIT), and the
   bundled Crimson Pro (OFL-1.1) are all safe to redistribute; recorded in
   `THIRD-PARTY-NOTICES.md`.

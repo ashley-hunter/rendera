@@ -338,6 +338,87 @@ export interface MsdfOptions {
 }
 
 /**
+ * Would linearly interpolating the three channels from texel `a` to neighbour
+ * `b` make the reconstructed *median* cross the 0.5 threshold more than once?
+ *
+ * A well-formed MSDF edge between two texels crosses the median threshold at
+ * most once (a single contour passes between them). A second crossing is a
+ * *clash*: two channels swap order across the gap, so bilinear sampling paints a
+ * one-texel sliver of the wrong side — the notch/hole that shows at sharp glyph
+ * features (serif tips, the apex of an A, stem/crossbar junctions) once the
+ * feature is about a texel wide. Detected by densely sampling the interpolant,
+ * which catches slivers regardless of which pair of channels crossed.
+ */
+function clashes(a: number[], b: number[], thr: number): boolean {
+  const medA = median(a[0], a[1], a[2]);
+  const medB = median(b[0], b[1], b[2]);
+  const bothInside = medA > thr && medB > thr;
+  const bothOutside = medA < thr && medB < thr;
+  // A clash only manifests where the two texels agree on inside/outside — then
+  // any excursion of the interpolated median past the threshold is spurious
+  // (an interior hole, or an exterior nub). Where they disagree, the crossing is
+  // a genuine edge and must be left alone.
+  if (!bothInside && !bothOutside) {
+    return false;
+  }
+  const N = 16;
+  for (let s = 1; s < N; s++) {
+    const t = s / N;
+    const m = median(
+      a[0] + t * (b[0] - a[0]),
+      a[1] + t * (b[1] - a[1]),
+      a[2] + t * (b[2] - a[2])
+    );
+    if (bothInside && m < thr) {
+      return true;
+    }
+    if (bothOutside && m > thr) {
+      return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * msdfgen-style error correction (post-process on the RGBA8 field). Any texel
+ * whose interpolation to a 4-neighbour would produce a false median crossing is
+ * collapsed to a single channel (all three set to the median) — locally an SDF,
+ * which cannot clash — removing the sliver while leaving every non-clashing
+ * texel (i.e. every genuine sharp corner MSDF represents correctly) untouched.
+ * Operates on the stored bytes, exactly what the GPU bilinearly samples.
+ */
+function errorCorrect(data: Uint8ClampedArray, width: number, height: number): void {
+  const thr = 127.5;
+  const px = (x: number, y: number): number[] => {
+    const k = (y * width + x) * 4;
+    return [data[k], data[k + 1], data[k + 2]];
+  };
+  const mark = new Uint8Array(width * height);
+  for (let y = 0; y < height; y++) {
+    for (let x = 0; x < width; x++) {
+      const a = px(x, y);
+      const clash =
+        (x > 0 && clashes(a, px(x - 1, y), thr)) ||
+        (x < width - 1 && clashes(a, px(x + 1, y), thr)) ||
+        (y > 0 && clashes(a, px(x, y - 1), thr)) ||
+        (y < height - 1 && clashes(a, px(x, y + 1), thr));
+      if (clash) {
+        mark[y * width + x] = 1;
+      }
+    }
+  }
+  for (let i = 0; i < width * height; i++) {
+    if (mark[i]) {
+      const k = i * 4;
+      const m = median(data[k], data[k + 1], data[k + 2]);
+      data[k] = m;
+      data[k + 1] = m;
+      data[k + 2] = m;
+    }
+  }
+}
+
+/**
  * Generate an MSDF for one glyph outline (`path`, font units, Y-up). Returns the
  * RGBA8 field plus placement metrics. Reconstruct coverage by sampling the
  * atlas and taking `median(r,g,b)`.
@@ -430,6 +511,8 @@ export function generateGlyphMsdf(path: Path, options: MsdfOptions): GlyphMsdf {
       data[k + 3] = 255;
     }
   }
+
+  errorCorrect(data, width, height);
 
   return {
     data,
