@@ -12,6 +12,7 @@ export * from './lib/changes';
 export * from './lib/document';
 export * from './lib/history';
 export * from './lib/blend';
+export * from './lib/boolean';
 export * from './lib/paint';
 export * from './lib/path';
 export * from './lib/stroke';

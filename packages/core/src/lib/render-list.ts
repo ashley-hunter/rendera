@@ -19,8 +19,9 @@ import type { BlendMode } from './blend';
 import { worldToScreenMatrix, type Camera } from './camera';
 import type { SceneDocument } from './document';
 import type { NodeId } from './id';
+import { booleanPath } from './boolean';
 import { compose, fromScaling, fromTranslation, invert, IDENTITY, type Mat2D } from './matrix';
-import type { GroupNode, ImageNode, LayerNode, PathNode, SpatialNode, Stroke, TextNode } from './node';
+import type { BooleanNode, GroupNode, ImageNode, LayerNode, PathNode, SpatialNode, Stroke, TextNode } from './node';
 import type { Paint } from './paint';
 import {
   pathBounds,
@@ -182,6 +183,40 @@ export function buildRenderList(
   const worldToScreen = worldToScreenMatrix(camera);
 
   /**
+   * Resolve a path or (nested) boolean node to a single exact-curve path in that
+   * node's OWN local space. Operands of a boolean are each brought into the
+   * boolean's space via their local matrix, then folded left-to-right by its op.
+   */
+  const resolveShape = (nid: NodeId): Path | null => {
+    const n = doc.get(nid) as SpatialNode | undefined;
+    if (!n || n.visible === false) {
+      return null;
+    }
+    if (n.type === 'path') {
+      return (n as PathNode).path;
+    }
+    if (n.type === 'boolean') {
+      const op = (n as BooleanNode).op;
+      const parts: Path[] = [];
+      for (const child of doc.getChildren(nid)) {
+        const shape = resolveShape(child.id);
+        if (shape) {
+          parts.push(transformPath(shape, doc.getLocalMatrix(child)));
+        }
+      }
+      if (parts.length === 0) {
+        return null;
+      }
+      let result = parts[0];
+      for (let i = 1; i < parts.length; i++) {
+        result = booleanPath(result, parts[i], op);
+      }
+      return result;
+    }
+    return null;
+  };
+
+  /**
    * Emit fill + stroke draw-path commands for a vector shape given in the
    * node's local space. Shared by path nodes and (shaped) text nodes: transform
    * to screen, convert cubics to quadratics at sub-pixel tolerance, and pass the
@@ -274,6 +309,17 @@ export function buildRenderList(
       const path = node as PathNode;
       const screenMat = compose(worldToScreen, doc.getWorldMatrix(id));
       emitVector(id, path.path, path.fill, path.stroke, path.fillRule ?? 'nonzero', screenMat, opacity, blend);
+      return;
+    }
+
+    if (node.type === 'boolean') {
+      const bnode = node as BooleanNode;
+      // Fold the operands (in this node's local space) into one exact-curve path.
+      const local = resolveShape(id);
+      if (local && local.subpaths.length > 0) {
+        const screenMat = compose(worldToScreen, doc.getWorldMatrix(id));
+        emitVector(id, local, bnode.fill, bnode.stroke, bnode.fillRule ?? 'nonzero', screenMat, opacity, blend);
+      }
       return;
     }
 

@@ -13,6 +13,7 @@
  */
 
 import type { BlendMode } from './blend';
+import type { BooleanOp } from './boolean';
 import type { Paint } from './paint';
 import type { FillRule, Path } from './path';
 import type { StrokeCap, StrokeJoin } from './stroke';
@@ -165,8 +166,32 @@ export interface TextNode extends SpatialNode {
   size?: Vec2;
 }
 
+/**
+ * A non-destructive boolean node: a container whose child path/boolean operands
+ * are combined by `op` (union / intersect / difference / xor) into a single
+ * exact-curve path at render time. Operands stay individually editable;
+ * `difference`/`xor` fold left-to-right (A − B − C …). Painted like a path.
+ */
+export interface BooleanNode extends SpatialNode {
+  readonly type: 'boolean';
+  name: string;
+  /** How the operands combine. */
+  op: BooleanOp;
+  /** How the combined region is painted. */
+  fill?: Fill;
+  fillRule?: FillRule;
+  stroke?: Stroke;
+}
+
 /** The built-in node types known to the default registry. */
-export type KnownNode = DocumentNode | GroupNode | LayerNode | ImageNode | PathNode | TextNode;
+export type KnownNode =
+  | DocumentNode
+  | GroupNode
+  | LayerNode
+  | ImageNode
+  | PathNode
+  | TextNode
+  | BooleanNode;
 
 /**
  * The fields a caller supplies when inserting a node. `id`/`parentId`/`index`

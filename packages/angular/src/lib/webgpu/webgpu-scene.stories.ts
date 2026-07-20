@@ -1,5 +1,6 @@
 import type { Meta, StoryObj } from '@storybook/angular';
 import { createBlendScene } from './blend-scene';
+import { createBooleanScene } from './boolean-scene';
 import { createGradientScene } from './gradient-scene';
 import { createImageSceneSource } from './image-scene';
 import { createTextScene } from './text-scene';
@@ -65,4 +66,14 @@ export const Gradients: Story = {
  */
 export const Text: Story = {
   args: { scene: createTextScene() },
+};
+
+/**
+ * Geometric boolean operations — union, intersection, difference, and exclusion
+ * (XOR) of a circle and a rounded square. Each result is a NEW exact-curve path
+ * (Bézier, not flattened): gradient-filled and stroked to show the combined
+ * outline is a real, editable, strokable shape. Zoom in — every edge stays sharp.
+ */
+export const Booleans: Story = {
+  args: { scene: createBooleanScene() },
 };

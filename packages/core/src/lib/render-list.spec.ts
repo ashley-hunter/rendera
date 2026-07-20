@@ -2,8 +2,8 @@ import { createCamera } from './camera';
 import { SceneDocument } from './document';
 import { createSequentialIdFactory } from './id';
 import { transformPoint } from './matrix';
-import type { GroupNode, ImageNode, LayerNode, PathNode } from './node';
-import { rectPath } from './path';
+import type { BooleanNode, GroupNode, ImageNode, LayerNode, PathNode } from './node';
+import { ellipsePath, rectPath } from './path';
 import {
   buildRenderList,
   debugColorForId,
@@ -127,6 +127,24 @@ describe('buildRenderList', () => {
     expect(cmd.paint.type).toBe('linear-gradient');
     // screenToLocal maps a screen point back to local space (undoes the zoom).
     expect(approxEquals(transformPoint(cmd.screenToLocal, vec2(20, 20)), vec2(10, 10))).toBe(true);
+  });
+
+  it('folds a boolean node into one combined draw-path (operands not drawn)', () => {
+    const doc = newDoc();
+    const bool = doc.insert<BooleanNode>({
+      type: 'boolean',
+      name: 'b',
+      op: 'union',
+      fill: { type: 'solid', color: { r: 1, g: 0, b: 0, a: 1 } },
+    });
+    doc.insert<PathNode>({ type: 'path', name: 'a', path: ellipsePath(0, 0, 10, 10) }, { parentId: bool.id });
+    doc.insert<PathNode>({ type: 'path', name: 'c', path: ellipsePath(8, 0, 10, 10) }, { parentId: bool.id });
+
+    const paths = buildRenderList(doc, createCamera()).filter((c) => c.op === 'draw-path');
+    expect(paths).toHaveLength(1); // the two operands become one combined path
+    const cmd = paths[0];
+    if (cmd.op !== 'draw-path') throw new Error('expected draw-path');
+    expect(cmd.paint).toEqual({ type: 'solid', color: { r: 1, g: 0, b: 0, a: 1 } });
   });
 
   it('applies the camera', () => {

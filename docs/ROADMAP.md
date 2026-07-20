@@ -140,7 +140,12 @@ so backend tests do **pixel readback** to assert colour correctness.
   pseudo-distance + median), skyline-packed atlas, `median`/`screenPxRange`
   sampling shader, with size-based routing (MSDF small · analytic large).
   *(Colour glyphs and vertical text are follow-ups.)*
-- ⬜ **Boolean ops** (union / intersect / difference on paths).
+- ✅ **Boolean ops (ADR 0009):** geometric **Bézier** union / intersect /
+  difference / exclude producing a NEW exact-curve `Path` (split–classify–select–
+  reassemble over subdivision intersections — no flattening), exposed as a
+  non-destructive `boolean` node (operands stay editable, nests). The combined
+  outline is strokable and hit-testable. *(General-position; degenerate overlaps
+  are a follow-up.)*
 
 ## Phase 6 — Effects & non-destructive stack  ⬜  → `@rendera/effects`
 

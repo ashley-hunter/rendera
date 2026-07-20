@@ -143,6 +143,17 @@ const textUtil: NodeUtil = {
   },
 };
 
+const booleanUtil: NodeUtil = {
+  type: 'boolean',
+  canHaveChildren: () => true, // its children are the operands
+  isSpatial: () => true,
+  createDefaults: () => ({ transform: IDENTITY_TRANSFORM }),
+  // The combined outline is resolved at render (needs the child operands +
+  // boolean math), so local bounds derive from the children's world bounds.
+  getLocalBounds: () => null,
+  hitTestLocal: () => false,
+};
+
 /** A registry pre-populated with the built-in node types. */
 export function createDefaultRegistry(): NodeRegistry {
   return new NodeRegistry()
@@ -151,5 +162,6 @@ export function createDefaultRegistry(): NodeRegistry {
     .register(layerUtil)
     .register(imageUtil)
     .register(pathUtil)
-    .register(textUtil);
+    .register(textUtil)
+    .register(booleanUtil);
 }
