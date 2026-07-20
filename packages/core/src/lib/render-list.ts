@@ -20,7 +20,7 @@ import { worldToScreenMatrix, type Camera } from './camera';
 import type { SceneDocument } from './document';
 import type { NodeId } from './id';
 import { booleanPath } from './boolean';
-import { compose, fromScaling, fromTranslation, invert, IDENTITY, type Mat2D } from './matrix';
+import { compose, fromScaling, fromTranslation, invert, transformPoint, IDENTITY, type Mat2D } from './matrix';
 import type { BooleanNode, GroupNode, ImageNode, LayerNode, PathNode, SpatialNode, Stroke, TextNode } from './node';
 import type { Paint } from './paint';
 import {
@@ -172,6 +172,67 @@ const DEFAULT_FILL: LinearRgba = { r: 0.5, g: 0.5, b: 0.5, a: 1 };
  */
 const booleanResultCache = new WeakMap<SceneDocument, Map<NodeId, { sig: string; path: Path | null }>>();
 
+/**
+ * Cache of camera-INDEPENDENT prepared vector geometry per node: the local-space
+ * fill (cubics→quads) and stroke outline, already reduced to edges + bounds.
+ * `buildRenderList` runs every frame; without this it re-ran the expensive
+ * cubic→quad conversion, `strokePath`, and `pathEdges` on every pan/zoom even
+ * though only the camera changed. Keyed by a content signature; each frame we
+ * just affine-transform the cached edges to screen (exact for lines/quadratics).
+ */
+const geometryCache = new WeakMap<SceneDocument, Map<NodeId, GeomEntry>>();
+
+interface PreparedGeom {
+  readonly edges: readonly PathEdge[];
+  readonly bounds: Bounds;
+}
+interface GeomEntry {
+  sig: string;
+  fill: PreparedGeom | null;
+  stroke: PreparedGeom | null;
+}
+
+/** Cubic→quad tolerance in local units, scaled to the shape so quality is
+ * zoom-stable (text is already quadratic, so this is a no-op there). */
+function localTolerance(b: Bounds | null): number {
+  if (!b) {
+    return 0.1;
+  }
+  const diag = Math.hypot(b.maxX - b.minX, b.maxY - b.minY);
+  return Math.min(0.5, Math.max(0.02, diag * 0.0004));
+}
+
+/** Affine-transform a list of path edges (control points map exactly). */
+function transformEdges(edges: readonly PathEdge[], m: Mat2D): PathEdge[] {
+  return edges.map((e) => ({
+    a: transformPoint(m, e.a),
+    b: transformPoint(m, e.b),
+    c: transformPoint(m, e.c),
+    quad: e.quad,
+  }));
+}
+
+/** The screen-space AABB of a local AABB under an affine transform. */
+function transformBoundsAabb(b: Bounds, m: Mat2D): Bounds {
+  const corners = [
+    transformPoint(m, vec2(b.minX, b.minY)),
+    transformPoint(m, vec2(b.maxX, b.minY)),
+    transformPoint(m, vec2(b.minX, b.maxY)),
+    transformPoint(m, vec2(b.maxX, b.maxY)),
+  ];
+  let minX = Infinity;
+  let minY = Infinity;
+  let maxX = -Infinity;
+  let maxY = -Infinity;
+  for (const p of corners) {
+    minX = Math.min(minX, p.x);
+    minY = Math.min(minY, p.y);
+    maxX = Math.max(maxX, p.x);
+    maxY = Math.max(maxY, p.y);
+  }
+  return { minX, minY, maxX, maxY };
+}
+
 /** A cheap content checksum of a path (changes when any point moves). */
 function pathChecksum(p: Path): number {
   let s = 0;
@@ -222,6 +283,11 @@ export function buildRenderList(
   if (!boolCache) {
     boolCache = new Map();
     booleanResultCache.set(doc, boolCache);
+  }
+  let geomCache = geometryCache.get(doc);
+  if (!geomCache) {
+    geomCache = new Map();
+    geometryCache.set(doc, geomCache);
   }
 
   /** A content signature of a shape/boolean subtree (for cache invalidation). */
@@ -290,6 +356,51 @@ export function buildRenderList(
    * to screen, convert cubics to quadratics at sub-pixel tolerance, and pass the
    * screen->local matrix so gradient paint evaluates in local space.
    */
+  /**
+   * Prepare (and cache) the camera-independent local geometry for a shape: fill
+   * edges + bounds (cubics→quads), and — stroked in LOCAL space so its outline
+   * complexity is bounded by the shape, not the zoom — the stroke edges + bounds.
+   */
+  const prepareGeom = (id: NodeId, localPath: Path, stroke: Stroke | undefined): GeomEntry => {
+    const sig =
+      'p' +
+      pathChecksum(localPath).toFixed(2) +
+      (stroke ? `|s${stroke.width},${stroke.cap ?? ''},${stroke.join ?? ''},${stroke.miterLimit ?? ''}` : '');
+    const cached = geomCache.get(id);
+    if (cached && cached.sig === sig) {
+      return cached;
+    }
+    const fillQuads = toQuadraticPath(localPath, localTolerance(pathBounds(localPath)));
+    const fillEdges = pathEdges(fillQuads);
+    const fillBounds = pathBounds(fillQuads);
+    const fill = fillBounds && fillEdges.length > 0 ? { edges: fillEdges, bounds: fillBounds } : null;
+
+    let strokeGeom: PreparedGeom | null = null;
+    if (stroke) {
+      const outline = strokePath(localPath, {
+        width: stroke.width,
+        cap: stroke.cap,
+        join: stroke.join,
+        miterLimit: stroke.miterLimit,
+      });
+      const strokeEdges = pathEdges(outline);
+      const strokeBounds = pathBounds(outline);
+      if (strokeBounds && strokeEdges.length > 0) {
+        strokeGeom = { edges: strokeEdges, bounds: strokeBounds };
+      }
+    }
+    const entry: GeomEntry = { sig, fill, stroke: strokeGeom };
+    geomCache.set(id, entry);
+    return entry;
+  };
+
+  /**
+   * Emit fill + stroke draw-path commands for a vector shape given in the node's
+   * local space. The heavy geometry (cubic→quad conversion, stroking, edge
+   * extraction) is cached camera-independently; here we only affine-transform the
+   * cached local edges to screen (exact for lines/quadratics) and pass the
+   * screen->local matrix so gradient paint evaluates in local space.
+   */
   const emitVector = (
     id: NodeId,
     localPath: Path,
@@ -300,56 +411,36 @@ export function buildRenderList(
     opacity: number,
     blend: BlendMode
   ): void => {
-    const screenPath = toQuadraticPath(transformPath(localPath, screenMat), 0.1);
+    const geom = prepareGeom(id, localPath, stroke);
     const screenToLocal = invert(screenMat) ?? IDENTITY;
 
-    if (fill || !stroke) {
-      const bounds = pathBounds(screenPath);
-      const edges = pathEdges(screenPath);
-      if (bounds && edges.length > 0) {
-        commands.push({
-          op: 'draw-path',
-          nodeId: id,
-          paint: fill ?? { type: 'solid', color: DEFAULT_FILL },
-          screenToLocal,
-          fillRule,
-          opacity,
-          blend,
-          edges,
-          bounds,
-        });
-      }
+    if ((fill || !stroke) && geom.fill) {
+      commands.push({
+        op: 'draw-path',
+        nodeId: id,
+        paint: fill ?? { type: 'solid', color: DEFAULT_FILL },
+        screenToLocal,
+        fillRule,
+        opacity,
+        blend,
+        edges: transformEdges(geom.fill.edges, screenMat),
+        bounds: transformBoundsAabb(geom.fill.bounds, screenMat),
+      });
     }
 
-    if (stroke) {
-      // Stroke in LOCAL space, then transform the outline to screen. The outline
-      // complexity is then bounded by the shape's own geometry, not its on-screen
-      // size — so a deep zoom no longer explodes the segment/join count (which was
-      // both a big perf sink and the source of beading along the stroke). Strokes
-      // also scale with the shape under non-uniform transforms, as expected.
-      const outline = strokePath(localPath, {
-        width: stroke.width,
-        cap: stroke.cap,
-        join: stroke.join,
-        miterLimit: stroke.miterLimit,
+    if (stroke && geom.stroke) {
+      commands.push({
+        op: 'draw-path',
+        nodeId: id,
+        paint: stroke.paint,
+        screenToLocal,
+        fillRule: 'nonzero',
+        opacity,
+        blend,
+        edges: transformEdges(geom.stroke.edges, screenMat),
+        bounds: transformBoundsAabb(geom.stroke.bounds, screenMat),
+        hardInterior: true,
       });
-      const screenOutline = toQuadraticPath(transformPath(outline, screenMat), 0.1);
-      const bounds = pathBounds(screenOutline);
-      const edges = pathEdges(screenOutline);
-      if (bounds && edges.length > 0) {
-        commands.push({
-          op: 'draw-path',
-          nodeId: id,
-          paint: stroke.paint,
-          screenToLocal,
-          fillRule: 'nonzero',
-          opacity,
-          blend,
-          edges,
-          bounds,
-          hardInterior: true,
-        });
-      }
     }
   };
 
