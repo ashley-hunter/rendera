@@ -31,6 +31,7 @@ import {
   hitTest,
   layoutTextNode,
   layoutTextNodeGlyphs,
+  linearToHex,
   makeBoolean,
   moveNode,
   MsdfAtlas,
@@ -126,6 +127,8 @@ export interface SceneSource {
 export class WebGpuScene {
   private readonly canvasRef =
     viewChild<ElementRef<HTMLCanvasElement>>('canvas');
+  private readonly textEditRef =
+    viewChild<ElementRef<HTMLTextAreaElement>>('textEditor');
 
   /** Optional scene to render; defaults to the shared sample document. */
   readonly scene = input<SceneSource | null>(null);
@@ -180,6 +183,19 @@ export class WebGpuScene {
   private panKey = false;
   /** In-memory clipboard (Cmd/Ctrl+C/X → copy, +V → paste). */
   private clipboard: Clipboard | null = null;
+
+  /** Inline text-edit overlay state (null when not editing a text node). */
+  protected readonly textEdit = signal<{
+    id: NodeId;
+    text: string;
+    transform: string; // CSS matrix() mapping node-local → stage px
+    fontSize: number;
+    color: string;
+    width: number;
+    height: number;
+  } | null>(null);
+  /** The node's visibility before editing (restored on commit/cancel). */
+  private textEditPrevVisible = true;
   /** Marquee start point in canvas px (null when not rubber-band selecting). */
   private marqueeStart: Vec2 | null = null;
   private marqueeAdditive = false;
@@ -280,6 +296,8 @@ export class WebGpuScene {
   private textPaths: ReadonlyMap<NodeId, Path> = new Map();
   /** Pre-baked MSDF layouts per (small) text node. */
   private textMsdf: ReadonlyMap<NodeId, MsdfNodeLayout> = new Map();
+  /** Loaded fonts (retained so text nodes can be re-shaped after an inline edit). */
+  private readonly fonts = new Map<string, RenderaFont>();
   private readonly camera = signal<Camera>(createCamera({ pan: vec2(20, 20) }));
   private renderer: WebGpuRenderer | null = null;
   private resizeObserver?: ResizeObserver;
@@ -369,13 +387,12 @@ export class WebGpuScene {
     if (!source?.fonts?.length) {
       return;
     }
-    const fonts = new Map<string, RenderaFont>();
     for (const font of source.fonts) {
       const data =
         typeof font.src === 'string'
           ? await fetch(font.src).then((r) => r.arrayBuffer())
           : font.src;
-      fonts.set(font.id, await RenderaFont.load(data));
+      this.fonts.set(font.id, await RenderaFont.load(data));
     }
 
     const paths = new Map<NodeId, Path>();
@@ -388,7 +405,7 @@ export class WebGpuScene {
         continue;
       }
       const text = node as TextNode;
-      const font = fonts.get(text.fontId);
+      const font = this.fonts.get(text.fontId);
       if (!font) {
         continue;
       }
@@ -435,6 +452,28 @@ export class WebGpuScene {
           atlasEmPx: atlas.emPx,
         });
       }
+      this.textMsdf = msdf;
+    }
+  }
+
+  /**
+   * Re-shape one text node after its string changed: recompute its analytic
+   * outline + block size, and drop it from the MSDF map so it renders from the
+   * (always-correct) outline. Cheap — no atlas re-bake.
+   */
+  private reshapeText(id: NodeId): void {
+    const node = this.document.get(id) as TextNode | undefined;
+    if (!node || node.type !== 'text') return;
+    const font = this.fonts.get(node.fontId);
+    if (!font) return;
+    const layout = layoutTextNode(font, node);
+    const paths = new Map(this.textPaths);
+    paths.set(id, layout.path);
+    this.textPaths = paths;
+    this.document.update(id, { size: vec2(layout.width, layout.height) });
+    if (this.textMsdf.has(id)) {
+      const msdf = new Map(this.textMsdf);
+      msdf.delete(id);
       this.textMsdf = msdf;
     }
   }
@@ -608,6 +647,97 @@ export class WebGpuScene {
     return { ids: set, primary: ids[ids.length - 1] };
   }
 
+  // --- inline text editing -------------------------------------------------
+
+  /** Double-click a text node to edit its string inline. */
+  protected onDblClick(event: MouseEvent): void {
+    const canvas = this.canvasRef()?.nativeElement;
+    if (!this.selectable() || !canvas) return;
+    const world = screenToWorld(this.camera(), this.toCanvas(event, canvas));
+    const hit = hitTest(this.document, world, { tolerance: 4 / this.camera().zoom });
+    if (hit && this.document.get(hit)?.type === 'text') this.startTextEdit(hit);
+  }
+
+  /** Open the overlay editor over `id`, hiding the canvas glyphs while editing. */
+  private startTextEdit(id: NodeId): void {
+    const node = this.document.get(id) as TextNode | undefined;
+    if (!node) return;
+    this.selection.set(createSelection([id]));
+    // CSS matrix mapping the node's local space to stage px: sample three points
+    // through (camera ∘ world) so rotation/scale/zoom are all captured.
+    const world = this.document.getWorldMatrix(id);
+    const cam = this.camera();
+    const toStage = (lx: number, ly: number): Vec2 => worldToScreen(cam, transformPoint(world, vec2(lx, ly)));
+    const o = toStage(0, 0);
+    const ex = toStage(1, 0);
+    const ey = toStage(0, 1);
+    const m = `matrix(${ex.x - o.x}, ${ex.y - o.y}, ${ey.x - o.x}, ${ey.y - o.y}, ${o.x}, ${o.y})`;
+    const size = node.size ?? vec2(node.fontSize * 8, node.fontSize * 1.4);
+    this.textEditPrevVisible = node.visible !== false;
+    this.history?.withoutHistory(() => this.document.update(id, { visible: false }));
+    this.textEdit.set({
+      id,
+      text: node.text,
+      transform: m,
+      fontSize: node.fontSize,
+      color: node.fill?.type === 'solid' ? linearToHex(node.fill.color) : '#ffffff',
+      width: Math.max(size.x, node.fontSize * 4),
+      height: Math.max(size.y, node.fontSize * 1.4),
+    });
+    this.rev.update((v) => v + 1);
+    this.draw();
+    // Focus + select after the textarea renders.
+    setTimeout(() => {
+      const el = this.textEditRef()?.nativeElement;
+      if (el) {
+        el.focus();
+        el.select();
+      }
+    });
+  }
+
+  /** Commit the edited text as one undo entry, re-shape, and close the editor. */
+  protected commitTextEdit(value: string): void {
+    const state = this.textEdit();
+    if (!state) return;
+    const id = state.id;
+    this.textEdit.set(null);
+    this.history?.withoutHistory(() => this.document.update(id, { visible: this.textEditPrevVisible }));
+    if (value !== state.text) {
+      // Text + re-shaped size land in ONE undo entry.
+      const run = (): void => {
+        this.document.update(id, { text: value });
+        this.reshapeText(id);
+      };
+      if (this.history) this.history.batch(run);
+      else run();
+    }
+    this.rev.update((v) => v + 1);
+    this.draw();
+  }
+
+  /** Abandon the edit, restoring the node unchanged. */
+  protected cancelTextEdit(): void {
+    const state = this.textEdit();
+    if (!state) return;
+    this.textEdit.set(null);
+    this.history?.withoutHistory(() => this.document.update(state.id, { visible: this.textEditPrevVisible }));
+    this.rev.update((v) => v + 1);
+    this.draw();
+  }
+
+  /** Keydown inside the text editor: Enter commits, Shift+Enter newlines, Esc cancels. */
+  protected onTextEditKey(event: KeyboardEvent): void {
+    event.stopPropagation(); // don't let editor keys drive canvas shortcuts
+    if (event.key === 'Enter' && !event.shiftKey) {
+      event.preventDefault();
+      this.commitTextEdit((event.target as HTMLTextAreaElement).value);
+    } else if (event.key === 'Escape') {
+      event.preventDefault();
+      this.cancelTextEdit();
+    }
+  }
+
   /** Begin a handle drag: freeze the frame + start point and snapshot transforms. */
   private startDrag(handle: HandleId, canvasPt: Vec2): void {
     this.dragHandle = handle;
@@ -634,11 +764,25 @@ export class WebGpuScene {
   }
 
   private afterHistory(): void {
-    // History only changed transforms here, but prune in case a future edit
-    // removed a selected node.
+    // Undo/redo may have changed a text node's string, so re-shape outlines to
+    // match the current document. Prune the selection in case a node was removed.
+    this.reshapeAllTextPaths();
     this.selection.update((s) => pruneSelection(s, this.document));
     this.rev.update((v) => v + 1);
     this.draw();
+  }
+
+  /** Rebuild every text node's analytic outline from its current string. */
+  private reshapeAllTextPaths(): void {
+    if (this.fonts.size === 0) return;
+    const paths = new Map(this.textPaths);
+    for (const node of this.document) {
+      if (node.type !== 'text') continue;
+      const text = node as TextNode;
+      const font = this.fonts.get(text.fontId);
+      if (font) paths.set(node.id, layoutTextNode(font, text).path);
+    }
+    this.textPaths = paths;
   }
 
   // --- layers panel --------------------------------------------------------

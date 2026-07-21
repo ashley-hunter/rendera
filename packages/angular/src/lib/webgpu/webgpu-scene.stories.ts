@@ -71,6 +71,18 @@ export const Editor: Story = {
 };
 
 /**
+ * Inline text editing. The high-fidelity text scene, made editable: **double-
+ * click** any line to edit it in place — an overlay textarea sits exactly over
+ * the glyphs (matching position, rotation, scale, and colour), and the canvas
+ * text hides while you type. **Enter** commits (Shift+Enter for a newline),
+ * **Esc** cancels; a commit re-shapes the outline and is a single undo. Select a
+ * line and the inspector edits its fill, size, and position too.
+ */
+export const TextEditing: Story = {
+  args: { scene: createTextScene(), selectable: true, exportable: true, showInspector: true },
+};
+
+/**
  * Image & pattern fills (the fourth paint kind): one asymmetric tile used four
  * ways — a single placed image (`pad`), a tiled `repeat` pattern, a mirror-tiled
  * `reflect` pattern, and the pattern clipping to a stroked star and an ellipse.

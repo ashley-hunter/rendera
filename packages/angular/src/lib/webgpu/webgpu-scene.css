@@ -182,6 +182,24 @@
   shape-rendering: crispEdges;
 }
 
+.text-editor {
+  position: absolute;
+  top: 0;
+  left: 0;
+  transform-origin: 0 0;
+  margin: 0;
+  padding: 0;
+  border: none;
+  outline: 1px solid #4aa3ff;
+  background: transparent;
+  resize: none;
+  overflow: hidden;
+  white-space: pre;
+  line-height: 1;
+  font-family: system-ui, sans-serif;
+  caret-color: #4aa3ff;
+}
+
 .overlay {
   position: absolute;
   inset: 0;
