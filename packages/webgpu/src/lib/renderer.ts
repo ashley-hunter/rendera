@@ -807,16 +807,23 @@ fn paintColor(p : vec2f) -> vec4f {
     // Image/pattern: local is the UV. pad = clamp, reflect = mirror-tile, repeat
     // leaves it to the repeat-address sampler (seamless, no fract discontinuity).
     var uv = local;
+    let dim = vec2f(textureDimensions(paintTex, 0));
     let spread = pp.grad.z;
     // Sampler is repeat-address; pad clamps to a half-texel inset (so the edge
     // texel doesn't wrap to the opposite side), reflect mirror-tiles, repeat is raw.
     if (spread == 0u) {
-      let e = 0.5 / vec2f(textureDimensions(paintTex, 0));
+      let e = 0.5 / dim;
       uv = clamp(uv, e, vec2f(1.0) - e);
     } else if (spread == 2u) {
       uv = abs(fract(uv * 0.5) * 2.0 - vec2f(1.0));
     }
-    return textureSampleLevel(paintTex, paintSamp, uv, 0.0);
+    // Mip LOD from the paint affine: inv0 columns are d(uv)/d(device-px); scale to
+    // output pixels (÷ supersample) and to texels (× dim). Analytic, so no seam
+    // spike from the spread wrap, and no derivative-uniformity constraint.
+    let du = vec2f(pp.inv0.x, pp.inv0.y) * dim / vp.scale;
+    let dv = vec2f(pp.inv0.z, pp.inv0.w) * dim / vp.scale;
+    let lod = max(0.0, log2(max(max(length(du), length(dv)), 1e-6)));
+    return textureSampleLevel(paintTex, paintSamp, uv, lod);
   }
   var t = 0.0;
   if (kind == 1u) {

@@ -84,6 +84,47 @@ describe('image & pattern fills', () => {
     expect(dominant(px(rb, 56, 56))).toBe('yellow'); // both wrap → (0.75, 0.75)
   });
 
+  it('mip-filters a minified pattern (no aliasing)', async () => {
+    // An 8x8 image: left half red, right half blue. Its top 1x1 mip is the average
+    // — purple. Tiled at 0.1px (extreme minification) the LOD clamps to that top
+    // mip, so every pixel is purple regardless of phase or supersampling. Without
+    // mip selection each pixel samples one texel and is pure red OR pure blue.
+    const N = 8;
+    const d = new Uint8ClampedArray(N * N * 4);
+    for (let y = 0; y < N; y++) {
+      for (let x = 0; x < N; x++) {
+        const o = (y * N + x) * 4;
+        if (x < N / 2) { d[o] = 255; } else { d[o + 2] = 255; }
+        d[o + 3] = 255;
+      }
+    }
+    const doc = SceneDocument.create({ idFactory: createSequentialIdFactory('n') });
+    doc.insert<PathNode>({
+      type: 'path',
+      name: 'r',
+      path: rectPath(0, 0, 64, 64),
+      fill: { type: 'image', assetId: 'rb', transform: { a: 0.13, b: 0, c: 0, d: 0.13, e: 0, f: 0 }, spread: 'repeat' },
+    });
+    // supersample 1 so this isolates the mip (SSAA would average sub-pixels too).
+    const renderer = await WebGpuRenderer.create(mk(64, 64), { colorSpace: 'srgb', dither: false, supersample: 1 });
+    renderer.registerImage('rb', await createImageBitmap(new ImageData(d, N, N)));
+    renderer.setClearColor({ r: 0, g: 0, b: 0, a: 1 });
+    renderer.setRenderList(buildRenderList(doc, createCamera()));
+    const rb = await renderer.readback();
+    renderer.destroy();
+
+    // Every sampled pixel is purple (both red and blue present) — the averaged
+    // top mip. A missing LOD would give pure red (b≈0) or pure blue (r≈0).
+    for (let y = 6; y < 58; y += 4) {
+      for (let x = 6; x < 58; x += 4) {
+        const [r, g, b] = px(rb, x, y);
+        expect(r).toBeGreaterThan(60);
+        expect(b).toBeGreaterThan(60);
+        expect(g).toBeLessThan(60);
+      }
+    }
+  });
+
   it('clamps outside the image with pad (image smaller than the shape)', async () => {
     // Place the image in the top-left 32px; pad clamps the rest to the edge texels.
     const rb = await render(fit(32, 'pad'), 64, 64);

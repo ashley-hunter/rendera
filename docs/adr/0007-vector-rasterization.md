@@ -307,3 +307,11 @@ clamps to a half-texel inset so the edge texel doesn't wrap, and `reflect`
 mirror-tiles in-shader. Because it rides the analytic fill, an image fill inherits
 the same resolution-independent AA and compositing as every other paint, and a
 stroke can be image-painted too.
+
+Minified patterns are mip-filtered: the LOD comes **analytically** from the paint
+affine — `inv0`'s columns are `d(uv)/d(device-px)`, scaled to output pixels
+(÷ supersample) and texels (× texture size) — so there is no `dpdx` derivative
+(hence no seam spike at the spread wrap and no uniform-control-flow constraint),
+and the sampler trilinearly blends the mip chain `registerImage` already builds.
+Sampling at LOD 0 aliased a shrunk pattern to a scatter of texels; the analytic
+LOD averages it. (Magnification stays sharp — the LOD floors at 0.)
