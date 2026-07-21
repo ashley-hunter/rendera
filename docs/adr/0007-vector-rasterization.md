@@ -164,10 +164,10 @@ Off-screen clusters are culled by their bbox quad (zero fragments); on-screen
 fragments only test their cluster's edges. A single connected shape stays one
 draw (a no-op). This is cheap, general (helps any multi-part path — icons, dashed
 runs, scattered marks), and correct because disjoint-bbox clusters have disjoint
-fills, so compositing them separately equals filling them together. The heavier
-per-tile **winding backdrop** (2D bins for a single large connected shape) is
-still the deferred next step; cluster-splitting handles the common multi-part
-case without it.
+fills, so compositing them separately equals filling them together. For a single
+large connected shape (a magnified glyph, a big fill), the **uniform-tile overlay**
+below skips the interior; a full per-tile winding backdrop (2D edge bins) remains
+deferred.
 
 Complementary edge-count fix: stroking flattens curves to polylines and emitted
 a full round-join **disc** at every vertex — including the ~1000 near-collinear
@@ -244,3 +244,37 @@ A subtlety this exposed: overlap resolution emits cubics, and converting a
 so `A−2B+C ≈ 0`). `dQuad`'s Cardano solve divides by that and returns garbage —
 which showed as a stroked rect's horizontal edges rendering in broken chunks.
 `dQuad` now falls back to `dLine` when the quad is effectively straight.
+
+## Follow-up: uniform-tile overlay (skip the magnified interior)
+
+The band loop still walks edges for *every* covered fragment. When a shape is
+magnified, its vast interior and the empty area around it are pure overhead — a
+pixel deep inside a zoomed glyph tests the strip's edges only to conclude what a
+neighbour already knew. A **16px tile grid** over each draw's bbox removes that:
+each tile is classified once, on the CPU, as
+
+- **boundary** — an edge's (reach-padded) bbox overlaps it, so a fragment there
+  runs the exact band loop as before; or
+- **uniform** — no edge lies within reach, so the winding is *constant* across the
+  tile and the distance to any edge exceeds the AA/stroke reach. Its one winding
+  number is found at the tile centre by a per-tile-row scanline sweep
+  (`O(rows·edges)`), and a fragment reads it and skips the loop entirely — solid
+  if inside, empty if outside; a distance-field stroke's uniform tiles are always
+  empty (no centerline near).
+
+This is exact (a uniform tile genuinely has no edge crossing it, so its winding
+*is* constant and there is no AA rim to draw) and it reuses the proven band loop
+untouched for the thin boundary band of tiles along each contour — so only the
+correctness-critical pixels run the per-pixel winding, and the interior/exterior
+(the bulk of a magnified shape) is one tile lookup.
+
+A *simpler-looking* scheme was tried first and rejected: give every tile a
+winding **backdrop** (`winding(corner;all) − winding(corner;tileEdges)`) and let
+each fragment add it to a per-tile edge walk. It is wrong — an edge that
+partially spans a tile's height crosses a pixel's scanline but not the tile
+corner's, and isn't in the tile's list, so it is counted nowhere (the even-odd
+donut test reproduces the misfill). A correct constant backdrop needs edges
+*clipped to tile rows* (Pathfinder-style, full-crossing edges contributing a
+prefix-summed ±1) — a larger effort left for later. The uniform-tile overlay gets
+the interior-skip win now without that machinery, because uniform tiles have no
+partial-span edges by definition.
