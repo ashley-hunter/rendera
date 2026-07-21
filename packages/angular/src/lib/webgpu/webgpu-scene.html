@@ -2,6 +2,13 @@
   <div class="toolbar">
     <button type="button" (click)="fit()" [disabled]="renderState() !== 'ready'">Fit</button>
     @if (selectable()) {
+      <span class="group" role="group" aria-label="Tools">
+        <button type="button" class="icon" [class.active]="tool() === 'select'" (click)="setTool('select')" title="Select (V)">⤢</button>
+        <button type="button" class="icon" [class.active]="tool() === 'rect'" (click)="setTool('rect')" title="Rectangle (R)">▭</button>
+        <button type="button" class="icon" [class.active]="tool() === 'ellipse'" (click)="setTool('ellipse')" title="Ellipse (O)">◯</button>
+        <button type="button" class="icon" [class.active]="tool() === 'pen'" (click)="setTool('pen')" title="Pen (P)">✎</button>
+      </span>
+      <span class="divider"></span>
       <button type="button" (click)="undo()" [disabled]="!canUndo()" title="Undo (Ctrl/Cmd+Z)">Undo</button>
       <button type="button" (click)="redo()" [disabled]="!canRedo()" title="Redo (Ctrl/Cmd+Shift+Z)">Redo</button>
     }
@@ -47,6 +54,7 @@
     <canvas
       #canvas
       class="canvas"
+      [class.tool-draw]="tool() !== 'select'"
       (pointerdown)="onPointerDown($event)"
       (pointermove)="onPointerMove($event)"
       (pointerup)="onPointerUp($event)"
@@ -97,6 +105,22 @@
       <svg class="handles" aria-hidden="true">
         @if (marquee(); as m) {
           <rect class="marquee" [attr.x]="m.x" [attr.y]="m.y" [attr.width]="m.w" [attr.height]="m.h" />
+        }
+        @if (drawPreview(); as p) {
+          @if (p.kind === 'rect') {
+            <rect class="draw-preview" [attr.x]="p.x" [attr.y]="p.y" [attr.width]="p.w" [attr.height]="p.h" />
+          } @else {
+            <ellipse class="draw-preview" [attr.cx]="p.x + p.w / 2" [attr.cy]="p.y + p.h / 2" [attr.rx]="p.w / 2" [attr.ry]="p.h / 2" />
+          }
+        }
+        @if (penOverlay(); as pen) {
+          @if (pen.rubber; as rb) {
+            <line class="pen-rubber" [attr.x1]="rb.from.x" [attr.y1]="rb.from.y" [attr.x2]="rb.to.x" [attr.y2]="rb.to.y" />
+          }
+          <polyline class="pen-line" [attr.points]="pen.poly" />
+          @for (d of pen.dots; track $index) {
+            <circle class="pen-dot" [attr.cx]="d.x" [attr.cy]="d.y" r="3.5" />
+          }
         }
         @for (l of guideLines(); track $index) {
           <line class="snap-guide" [attr.x1]="l.x1" [attr.y1]="l.y1" [attr.x2]="l.x2" [attr.y2]="l.y2" />

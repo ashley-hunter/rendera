@@ -32,7 +32,10 @@ export const CrispImage: Story = {
 };
 
 /**
- * Interactive editing. **Click** a shape to select it, or **drag from empty
+ * Interactive editing. The toolbar's **tools** — Select (V), Rectangle (R),
+ * Ellipse (O), Pen (P) — draw new shapes: drag out a rect/ellipse, or click to
+ * lay down pen points (click the first point or double-click to finish, Esc
+ * cancels). Otherwise, **click** a shape to select it, or **drag from empty
  * space** to rubber-band select (shift adds); hit-testing respects transforms,
  * winding-rule fills, and stroke width. The selection shows an **oriented frame
  * with handles**: drag the body to **move**, a corner/edge to **scale** (shift =

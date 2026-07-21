@@ -20,7 +20,11 @@ import {
   deleteNodes,
   dragTransform,
   duplicateNodes,
+  ellipseShape,
+  isDrawnBigEnough,
   pasteNodes,
+  polylineShape,
+  rectShape,
   EMPTY_SELECTION,
   exportSvg,
   fitBounds,
@@ -184,6 +188,16 @@ export class WebGpuScene {
   /** In-memory clipboard (Cmd/Ctrl+C/X → copy, +V → paste). */
   private clipboard: Clipboard | null = null;
 
+  /** The active tool: pointer selection, or one of the shape-drawing tools. */
+  protected readonly tool = signal<'select' | 'rect' | 'ellipse' | 'pen'>('select');
+  /** Rect/ellipse draw start in world space (null when not dragging out a shape). */
+  private drawStart: Vec2 | null = null;
+  /** Live draw preview in CSS px for the overlay (rect/ellipse), or null. */
+  protected readonly drawPreview = signal<{ kind: 'rect' | 'ellipse'; x: number; y: number; w: number; h: number } | null>(null);
+  /** Pen tool: committed points (world) and the live cursor for the rubber-band. */
+  private readonly penPoints = signal<Vec2[]>([]);
+  private readonly penCursor = signal<Vec2 | null>(null);
+
   /** Inline text-edit overlay state (null when not editing a text node). */
   protected readonly textEdit = signal<{
     id: NodeId;
@@ -289,6 +303,19 @@ export class WebGpuScene {
     const xs = rulerTicks(tl.x, br.x, grid).map((wx) => worldToScreen(cam, vec2(wx, 0)).x);
     const ys = rulerTicks(tl.y, br.y, grid).map((wy) => worldToScreen(cam, vec2(0, wy)).y);
     return { xs, ys, w, h };
+  });
+
+  /** Pen-tool preview: the committed points (screen px), a polyline, and the
+   *  rubber-band segment to the cursor. Null when the pen isn't mid-path. */
+  protected readonly penOverlay = computed(() => {
+    const pts = this.penPoints();
+    if (this.tool() !== 'pen' || pts.length === 0) return null;
+    const cam = this.camera();
+    const dots = pts.map((p) => worldToScreen(cam, p));
+    const poly = dots.map((d) => `${d.x},${d.y}`).join(' ');
+    const cursor = this.penCursor();
+    const rubber = cursor ? { from: dots[dots.length - 1], to: worldToScreen(cam, cursor) } : null;
+    return { dots, poly, rubber };
   });
 
   private document: SceneDocument = createSampleDocument();
@@ -504,6 +531,12 @@ export class WebGpuScene {
     this.pointerMoved = false;
     const pt = this.toCanvas(event, canvas);
 
+    // A drawing tool takes over the pointer entirely (no select/pan).
+    if (this.tool() !== 'select') {
+      this.onDrawPointerDown(pt);
+      return;
+    }
+
     // Editing: grab a handle, or the body of an already-selected shape, to
     // transform instead of pan. Everything else falls through to pan/select.
     if (this.selectable()) {
@@ -537,6 +570,10 @@ export class WebGpuScene {
       return;
     }
     const pt = this.toCanvas(event, canvas);
+    if (this.tool() !== 'select') {
+      this.onDrawPointerMove(pt);
+      return;
+    }
     if (this.dragHandle && this.dragBox && this.dragStart) {
       this.pointerMoved = true;
       this.beginInteraction();
@@ -582,6 +619,11 @@ export class WebGpuScene {
   }
 
   protected onPointerUp(event: PointerEvent): void {
+    if (this.tool() !== 'select') {
+      const canvas = this.canvasRef()?.nativeElement;
+      if (canvas) this.onDrawPointerUp(this.toCanvas(event, canvas));
+      return;
+    }
     if (this.dragHandle) {
       // Commit the whole drag as ONE undo entry: restore to the pre-drag snapshot
       // without history, then apply the net delta inside a transaction (records a
@@ -647,12 +689,97 @@ export class WebGpuScene {
     return { ids: set, primary: ids[ids.length - 1] };
   }
 
+  // --- drawing tools -------------------------------------------------------
+
+  /** Stroke style for pen paths finished open (not closed into a polygon). */
+  private static readonly PEN_STROKE = { paint: { type: 'solid' as const, color: { r: 0.9, g: 0.9, b: 0.95, a: 1 } }, width: 2 };
+
+  /** Select a tool; leaving the pen mid-path finishes it (open). */
+  protected setTool(tool: 'select' | 'rect' | 'ellipse' | 'pen'): void {
+    if (this.tool() === 'pen' && tool !== 'pen') this.finishPen(false);
+    this.tool.set(tool);
+    if (tool === 'select') this.cancelDraw();
+  }
+
+  private onDrawPointerDown(pt: Vec2): void {
+    const world = screenToWorld(this.camera(), pt);
+    if (this.tool() === 'pen') {
+      const pts = this.penPoints();
+      // Click near the first point → close the polygon.
+      if (pts.length >= 2) {
+        const first = worldToScreen(this.camera(), pts[0]);
+        if ((first.x - pt.x) ** 2 + (first.y - pt.y) ** 2 <= 100) {
+          this.finishPen(true);
+          return;
+        }
+      }
+      this.penPoints.set([...pts, world]);
+      return;
+    }
+    this.drawStart = world; // rect / ellipse: start a drag
+  }
+
+  private onDrawPointerMove(pt: Vec2): void {
+    if (this.tool() === 'pen') {
+      if (this.penPoints().length) this.penCursor.set(screenToWorld(this.camera(), pt));
+      return;
+    }
+    if (!this.drawStart) return;
+    const a = worldToScreen(this.camera(), this.drawStart);
+    this.drawPreview.set({
+      kind: this.tool() === 'ellipse' ? 'ellipse' : 'rect',
+      x: Math.min(a.x, pt.x), y: Math.min(a.y, pt.y), w: Math.abs(pt.x - a.x), h: Math.abs(pt.y - a.y),
+    });
+  }
+
+  private onDrawPointerUp(pt: Vec2): void {
+    if (this.tool() === 'pen' || !this.drawStart) return; // pen commits on click
+    const a = this.drawStart;
+    const b = screenToWorld(this.camera(), pt);
+    this.drawStart = null;
+    this.drawPreview.set(null);
+    if (!isDrawnBigEnough(a, b, 3 / this.camera().zoom)) return; // ignore a stray click
+    const input = this.tool() === 'ellipse' ? ellipseShape(a, b) : rectShape(a, b);
+    const created = this.history ? this.history.batch(() => this.document.insert(input)) : this.document.insert(input);
+    this.selection.set(createSelection([created.id]));
+    this.tool.set('select'); // one-shot: back to selecting the new shape
+    this.rev.update((v) => v + 1);
+    this.draw();
+  }
+
+  /** Finish the pen path: closed → filled polygon, open → stroked path. */
+  private finishPen(closed: boolean): void {
+    const pts = this.penPoints();
+    this.penPoints.set([]);
+    this.penCursor.set(null);
+    if (pts.length >= 2) {
+      const input = closed ? polylineShape(pts, true) : polylineShape(pts, false, { stroke: WebGpuScene.PEN_STROKE });
+      const created = this.history ? this.history.batch(() => this.document.insert(input)) : this.document.insert(input);
+      this.selection.set(createSelection([created.id]));
+      this.rev.update((v) => v + 1);
+    }
+    this.tool.set('select');
+    this.draw();
+  }
+
+  /** Abandon any in-progress drawing (tool switch / Escape). */
+  private cancelDraw(): void {
+    this.drawStart = null;
+    this.drawPreview.set(null);
+    this.penPoints.set([]);
+    this.penCursor.set(null);
+  }
+
   // --- inline text editing -------------------------------------------------
 
-  /** Double-click a text node to edit its string inline. */
+  /** Double-click a text node to edit it inline; or finish a pen path. */
   protected onDblClick(event: MouseEvent): void {
     const canvas = this.canvasRef()?.nativeElement;
     if (!this.selectable() || !canvas) return;
+    if (this.tool() === 'pen') {
+      this.finishPen(false);
+      return;
+    }
     const world = screenToWorld(this.camera(), this.toCanvas(event, canvas));
     const hit = hitTest(this.document, world, { tolerance: 4 / this.camera().zoom });
     if (hit && this.document.get(hit)?.type === 'text') this.startTextEdit(hit);
@@ -877,6 +1004,27 @@ export class WebGpuScene {
       this.panKey = true;
       event.preventDefault();
       return;
+    }
+    if (key === 'Escape') {
+      // Cancel any in-progress drawing and return to the select tool.
+      if (this.tool() !== 'select') {
+        this.cancelDraw();
+        this.tool.set('select');
+        this.rev.update((v) => v + 1);
+        this.draw();
+        event.preventDefault();
+      }
+      return;
+    }
+    // Tool shortcuts (no modifier): V select, R rect, O ellipse, P pen.
+    if (!mod && !event.shiftKey) {
+      const tools: Record<string, 'select' | 'rect' | 'ellipse' | 'pen'> = { v: 'select', r: 'rect', o: 'ellipse', p: 'pen' };
+      const t = tools[key.toLowerCase()];
+      if (t) {
+        event.preventDefault();
+        this.setTool(t);
+        return;
+      }
     }
     if (mod && (key === 'z' || key === 'Z')) {
       event.preventDefault();
