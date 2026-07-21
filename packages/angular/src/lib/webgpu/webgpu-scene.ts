@@ -9,11 +9,15 @@ import {
   viewChild,
 } from '@angular/core';
 import {
+  applyTransform,
   buildRenderList,
   createCamera,
+  dragTransform,
   EMPTY_SELECTION,
   exportSvg,
   fitBounds,
+  handleAt,
+  handles,
   hitTest,
   layoutTextNode,
   layoutTextNodeGlyphs,
@@ -22,19 +26,24 @@ import {
   RenderaFont,
   resolveSelectionClick,
   screenToWorld,
-  selectionBounds,
+  selectionFrame,
+  transformPoint,
   vec2,
   ViewportGesture,
   withPixelRatio,
   worldToScreen,
   zoomAround,
   type Camera,
+  type HandleId,
+  type Mat2D,
   type MsdfNodeLayout,
   type NodeId,
   type Path,
   type SceneDocument,
   type Selection,
+  type SpatialNode,
   type TextNode,
+  type Transform,
   type Vec2,
   type ViewportGestureChange,
 } from '@rendera/core';
@@ -97,30 +106,49 @@ export class WebGpuScene {
   /** Show SVG / PNG export buttons in the toolbar (default off). */
   readonly exportable = input(false);
 
-  /** The current selection (ids + primary); drives the on-screen bounding box. */
+  /** The current selection (ids + primary); drives the on-screen frame. */
   protected readonly selection = signal<Selection>(EMPTY_SELECTION);
+  /** Bumped after any transform mutation so the frame overlay recomputes (the
+   *  document itself is not a signal). */
+  private readonly rev = signal(0);
   private pointerMoved = false;
 
-  /** The selection frame in CSS px over the stage, or null when nothing is
-   *  selected. Recomputes as the camera or selection changes. */
-  protected readonly selectionBox = computed(() => {
+  // Active handle drag: the grip, the frozen frame + start point (world), and a
+  // snapshot of the dragged nodes' transforms (restored each move so the delta is
+  // always from the drag start, never compounding).
+  private dragHandle: HandleId | null = null;
+  private dragBox: Mat2D | null = null;
+  private dragStart: Vec2 | null = null;
+  private dragSnapshot = new Map<NodeId, Transform>();
+
+  /** The selection's oriented frame (unit box → world), or null. */
+  private readonly frameBox = computed<Mat2D | null>(() => {
+    this.rev();
     const sel = this.selection();
-    if (sel.ids.size === 0) return null;
-    const b = selectionBounds(this.document, sel.ids);
-    if (!b) return null;
+    return sel.ids.size && this.selectable() ? selectionFrame(this.document, sel.ids) : null;
+  });
+
+  /** The frame + handles projected to CSS px over the stage (an SVG overlay). */
+  protected readonly overlay = computed(() => {
+    const f = this.frameBox();
+    if (!f) return null;
     const cam = this.camera();
-    let minX = Infinity;
-    let minY = Infinity;
-    let maxX = -Infinity;
-    let maxY = -Infinity;
-    for (const c of [vec2(b.minX, b.minY), vec2(b.maxX, b.minY), vec2(b.minX, b.maxY), vec2(b.maxX, b.maxY)]) {
-      const p = worldToScreen(cam, c);
-      minX = Math.min(minX, p.x);
-      minY = Math.min(minY, p.y);
-      maxX = Math.max(maxX, p.x);
-      maxY = Math.max(maxY, p.y);
-    }
-    return { left: minX, top: minY, width: maxX - minX, height: maxY - minY };
+    const s = (p: Vec2) => worldToScreen(cam, p);
+    const placed = handles(f).map((h) => ({ id: h.id, ...s(h.point) }));
+    const grips = placed.filter((h) => h.id !== 'rotate');
+    const corner = (id: HandleId) => placed.find((h) => h.id === id)!;
+    const nw = corner('nw');
+    const ne = corner('ne');
+    const se = corner('se');
+    const sw = corner('sw');
+    const rot = corner('rotate');
+    const topC = s(transformPoint(f, vec2(0.5, 0)));
+    return {
+      poly: `${nw.x},${nw.y} ${ne.x},${ne.y} ${se.x},${se.y} ${sw.x},${sw.y}`,
+      grips,
+      rotate: rot,
+      topC,
+    };
   });
 
   private document: SceneDocument = createSampleDocument();
@@ -310,7 +338,26 @@ export class WebGpuScene {
       // Ignore non-active pointers (e.g. synthetic events).
     }
     this.pointerMoved = false;
-    this.gesture.down(event.pointerId, this.toCanvas(event, canvas));
+    const pt = this.toCanvas(event, canvas);
+
+    // Editing: grab a handle, or the body of an already-selected shape, to
+    // transform instead of pan. Everything else falls through to pan/select.
+    if (this.selectable()) {
+      const ov = this.overlay();
+      const grip = ov ? handleAt([...ov.grips, ov.rotate].map((h) => ({ id: h.id, point: vec2(h.x, h.y) })), pt, 11) : null;
+      if (grip) {
+        this.startDrag(grip, pt);
+        return;
+      }
+      if (this.selection().ids.size) {
+        const hit = hitTest(this.document, screenToWorld(this.camera(), pt), { tolerance: 6 / this.camera().zoom, select: 'outermost' });
+        if (hit && this.selection().ids.has(hit)) {
+          this.startDrag('move', pt);
+          return;
+        }
+      }
+    }
+    this.gesture.down(event.pointerId, pt);
   }
 
   protected onPointerMove(event: PointerEvent): void {
@@ -318,7 +365,22 @@ export class WebGpuScene {
     if (!canvas) {
       return;
     }
-    const change = this.gesture.move(event.pointerId, this.toCanvas(event, canvas));
+    const pt = this.toCanvas(event, canvas);
+    if (this.dragHandle && this.dragBox && this.dragStart) {
+      this.pointerMoved = true;
+      this.beginInteraction();
+      // Restore the snapshot, then apply the from-start delta (never compounding).
+      for (const [id, t] of this.dragSnapshot) this.document.update(id, { transform: t });
+      const delta = dragTransform(this.dragBox, this.dragHandle, this.dragStart, screenToWorld(this.camera(), pt), {
+        uniform: event.shiftKey,
+        fromCentre: event.altKey,
+      });
+      applyTransform(this.document, [...this.dragSnapshot.keys()], delta);
+      this.rev.update((v) => v + 1);
+      this.draw();
+      return;
+    }
+    const change = this.gesture.move(event.pointerId, pt);
     if (change) {
       this.pointerMoved = true;
       this.beginInteraction();
@@ -327,6 +389,13 @@ export class WebGpuScene {
   }
 
   protected onPointerUp(event: PointerEvent): void {
+    if (this.dragHandle) {
+      this.dragHandle = null;
+      this.dragBox = null;
+      this.dragStart = null;
+      this.dragSnapshot.clear();
+      return;
+    }
     this.gesture.up(event.pointerId);
     // A click (no drag) selects the top-most shape; empty space clears; shift
     // adds/removes. Drag is reserved for panning.
@@ -337,6 +406,19 @@ export class WebGpuScene {
       this.selection.update((s) => resolveSelectionClick(s, hit, { additive: event.shiftKey }));
     }
     this.pointerMoved = false;
+  }
+
+  /** Begin a handle drag: freeze the frame + start point and snapshot transforms. */
+  private startDrag(handle: HandleId, canvasPt: Vec2): void {
+    this.dragHandle = handle;
+    this.dragBox = this.frameBox();
+    this.dragStart = screenToWorld(this.camera(), canvasPt);
+    this.dragSnapshot = new Map();
+    for (const id of this.selection().ids) {
+      const node = this.document.get(id) as SpatialNode | undefined;
+      if (node && 'transform' in node) this.dragSnapshot.set(id, node.transform);
+    }
+    this.beginInteraction();
   }
 
   /** Download the scene as an SVG file (vector, re-importable). */

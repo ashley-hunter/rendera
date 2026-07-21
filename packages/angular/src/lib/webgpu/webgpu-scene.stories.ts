@@ -32,11 +32,14 @@ export const CrispImage: Story = {
 };
 
 /**
- * Interactive editing: **click** a shape to select it (empty space clears,
+ * Interactive editing. **Click** a shape to select it (empty space clears,
  * shift-click adds/removes) — hit-testing respects transforms, winding-rule
- * fills, and stroke width, and a bounding box tracks the selection as you pan and
- * zoom. The **SVG** and **PNG** toolbar buttons export the scene as a
- * (re-importable) vector file and a raster capture. Drag still pans, wheel zooms.
+ * fills, and stroke width. The selection shows an **oriented frame with handles**:
+ * drag the body to **move**, a corner/edge to **scale** (shift = keep aspect, alt
+ * = from centre), or the top grip to **rotate**. The frame stays oriented with a
+ * rotated shape, so scaling never skews it. The **SVG** / **PNG** toolbar buttons
+ * export the scene as a re-importable vector file and a raster capture. Empty-space
+ * drag still pans, wheel zooms.
  */
 export const Editor: Story = {
   args: { scene: createVectorScene(), selectable: true, exportable: true },
