@@ -199,22 +199,51 @@ export function buildTiles(
     }
   };
   edges.forEach((e, ei) => {
-    // Distance reach: every tile whose cell the padded edge bbox overlaps.
-    const c0 = col(Math.min(e.a.x, e.b.x, e.c.x) - reach);
-    const c1 = col(Math.max(e.a.x, e.b.x, e.c.x) + reach);
-    const r0 = row(Math.min(e.a.y, e.b.y, e.c.y) - reach);
-    const r1 = row(Math.max(e.a.y, e.b.y, e.c.y) + reach);
-    for (let r = r0; r <= r1; r++) {
-      for (let c = c0; c <= c1; c++) add(r * tilesX + c, ei);
+    // Distance reach: the tiles the edge actually passes through (within `reach`).
+    // Binning by the whole edge bbox would be catastrophic for a long diagonal —
+    // its bbox covers most of the grid, so its interior never goes empty. Instead
+    // walk the edge in ~tile-size steps and bin each short sub-segment's (tight)
+    // bbox: a superset of the traversed tiles, so every tile the edge crosses is
+    // covered (required for the winding backdrop) with O(length) work, not O(area).
+    const approxLen = e.quad
+      ? Math.hypot(e.b.x - e.a.x, e.b.y - e.a.y) + Math.hypot(e.c.x - e.b.x, e.c.y - e.b.y)
+      : Math.hypot(e.c.x - e.a.x, e.c.y - e.a.y);
+    const n = Math.max(1, Math.ceil(approxLen / tileSize));
+    let px = e.a.x;
+    let py = e.a.y;
+    for (let i = 1; i <= n; i++) {
+      const t = i / n;
+      let qx: number;
+      let qy: number;
+      if (e.quad) {
+        const u = 1 - t;
+        qx = u * u * e.a.x + 2 * u * t * e.b.x + t * t * e.c.x;
+        qy = u * u * e.a.y + 2 * u * t * e.b.y + t * t * e.c.y;
+      } else {
+        qx = e.a.x + t * (e.c.x - e.a.x);
+        qy = e.a.y + t * (e.c.y - e.a.y);
+      }
+      const c0 = col(Math.min(px, qx) - reach);
+      const c1 = col(Math.max(px, qx) + reach);
+      const r0 = row(Math.min(py, qy) - reach);
+      const r1 = row(Math.max(py, qy) + reach);
+      for (let r = r0; r <= r1; r++) {
+        for (let c = c0; c <= c1; c++) add(r * tilesX + c, ei);
+      }
+      px = qx;
+      py = qy;
     }
     // Partial: a strip containing one of the edge's special y-values may cross a
     // rightward ray for some rows of a tile but not others, so it must be in the
-    // list of every tile in that strip (the backdrop can't represent it).
+    // list of every tile in that strip that a rightward ray could reach it from
+    // — i.e. tiles at or left of the edge's rightmost extent (a ray from a tile
+    // entirely right of the edge can't cross it). The backdrop can't represent it.
     if (computeBackdrop) {
+      const cMax = col(Math.max(e.a.x, e.b.x, e.c.x));
       for (const sy of specialYs(e)) {
         if (sy < originY || sy > originY + tilesY * tileSize) continue;
         const r = row(sy);
-        for (let c = 0; c < tilesX; c++) add(r * tilesX + c, ei);
+        for (let c = 0; c <= cMax; c++) add(r * tilesX + c, ei);
       }
     }
   });

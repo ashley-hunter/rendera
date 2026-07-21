@@ -283,9 +283,11 @@ exactly the fix. The whole thing is proven by a CPU winding-correctness test
 (`tiling.spec.ts`) comparing `backdrop + per-tile winding` against a brute-force
 sum over all edges, at a dense point grid, before it reaches the GPU.
 
-The interior/exterior skip helps every shape. Thinning the *boundary* tiles most
-helps long, straight edges (large low-poly fills): flattened curves emit many
-short quad segments, so nearly every segment is "partial" in its strip and a
-boundary tile's list stays close to band-sized. Cutting the flattened edge count
-(adaptive tolerance) would broaden the win to curved content and is the natural
-next step.
+Edges are binned into tiles by **walking each edge in ~tile-size steps** and
+binning each short sub-segment's tight bbox — never the whole edge's bbox. That
+matters: a long diagonal edge's bbox covers most of the grid, so bbox-binning put
+it in ~every tile and the interior never went empty (a magnified `V` had 76% of
+its tiles non-empty). Walking the edge is `O(length)`, bins only the tiles it
+actually crosses, and drops that `V` to **4%** non-empty — so the interior/exterior
+skip finally pays off for all content, curved glyphs included (a magnified glyph
+now lists 3–14× fewer edges across its tiles).
