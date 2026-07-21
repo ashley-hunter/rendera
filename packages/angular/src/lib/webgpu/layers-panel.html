@@ -1,0 +1,43 @@
+<div class="layers-panel">
+  <div class="panel-title">Layers</div>
+  <div class="rows">
+    @for (row of rows(); track row.id) {
+      <div
+        class="row"
+        role="button"
+        tabindex="0"
+        [class.selected]="isSelected(row.id)"
+        [class.hidden]="!row.visible"
+        [class]="dropClass(row)"
+        [style.padding-left.px]="8 + row.depth * 14"
+        draggable="true"
+        (click)="onSelect(row, $event)"
+        (keydown.enter)="onSelect(row, $event)"
+        (keydown.space)="onSelect(row, $event)"
+        (dragstart)="onDragStart(row, $event)"
+        (dragover)="onDragOver(row, $event)"
+        (drop)="onDrop(row, $event)"
+        (dragend)="onDragEnd()"
+      >
+        @if (row.container && row.hasChildren) {
+          <button type="button" class="caret" [class.collapsed]="row.collapsed" (click)="onToggleCollapse(row, $event)" aria-label="Collapse">▾</button>
+        } @else {
+          <span class="caret-spacer"></span>
+        }
+        <span class="glyph" [attr.data-type]="row.type" aria-hidden="true"></span>
+        <span class="name">{{ row.name }}</span>
+        <button
+          type="button"
+          class="eye"
+          [class.off]="!row.visible"
+          (click)="onToggleVisible(row, $event)"
+          [attr.aria-label]="row.visible ? 'Hide' : 'Show'"
+          [title]="row.visible ? 'Hide' : 'Show'"
+        >{{ row.visible ? '●' : '○' }}</button>
+      </div>
+    }
+    @if (rows().length === 0) {
+      <div class="empty">No layers</div>
+    }
+  </div>
+</div>

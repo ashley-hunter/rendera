@@ -129,6 +129,12 @@ export class SceneDocument {
     return this.nodes.has(id);
   }
 
+  /** Whether a node's type may contain children (group / boolean / mask / document). */
+  canHaveChildren(id: NodeId): boolean {
+    const node = this.nodes.get(id);
+    return node ? this.registry.require(node.type).canHaveChildren() : false;
+  }
+
   /** The parent of a node, or `undefined` for the root. */
   getParent(id: NodeId): SceneNode | undefined {
     const parentId = this.require(id).parentId;

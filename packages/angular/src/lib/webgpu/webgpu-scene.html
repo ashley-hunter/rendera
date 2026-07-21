@@ -16,7 +16,8 @@
       <span class="fps">{{ fps() }} fps</span>
     }
   </div>
-  <div class="stage">
+  <div class="body">
+    <div class="stage">
     <canvas
       #canvas
       class="canvas"
@@ -46,6 +47,17 @@
         <p>WebGPU is not available in this browser.</p>
         <p class="detail">{{ message() }}</p>
       </div>
+    }
+    </div>
+    @if (showLayers()) {
+      <rendera-layers-panel
+        [document]="doc()"
+        [selection]="selection()"
+        [rev]="revValue()"
+        (selectRow)="onLayerSelect($event)"
+        (toggleVisible)="onLayerToggleVisible($event)"
+        (reorder)="onLayerReorder($event)"
+      />
     }
   </div>
 </div>

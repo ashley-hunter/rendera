@@ -1,0 +1,131 @@
+.layers-panel {
+  display: flex;
+  flex-direction: column;
+  width: 190px;
+  background: #141418;
+  border-left: 1px solid #333;
+  font-family: system-ui, sans-serif;
+  color: #ddd;
+  user-select: none;
+}
+
+.panel-title {
+  padding: 8px 10px;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: #888;
+  border-bottom: 1px solid #2a2a30;
+}
+
+.rows {
+  flex: 1;
+  overflow-y: auto;
+  min-height: 0;
+}
+
+.row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  height: 26px;
+  padding-right: 8px;
+  font-size: 12px;
+  cursor: pointer;
+  border-top: 1px solid transparent;
+  border-bottom: 1px solid transparent;
+}
+
+.row:hover {
+  background: #1e1e24;
+}
+
+.row.selected {
+  background: #16324f;
+  color: #cfe6ff;
+}
+
+.row.hidden .name,
+.row.hidden .glyph {
+  opacity: 0.4;
+}
+
+/* Drop indicators while dragging. */
+.row.drop-above {
+  border-top-color: #4aa3ff;
+}
+
+.row.drop-below {
+  border-bottom-color: #4aa3ff;
+}
+
+.row.drop-inside {
+  background: #143a2a;
+  box-shadow: inset 0 0 0 1px #3ad18b;
+}
+
+.caret,
+.eye {
+  background: none;
+  border: none;
+  color: inherit;
+  cursor: pointer;
+  padding: 0;
+  font-size: 11px;
+  line-height: 1;
+}
+
+.caret {
+  width: 12px;
+  color: #999;
+  transition: transform 0.1s;
+}
+
+.caret.collapsed {
+  transform: rotate(-90deg);
+}
+
+.caret-spacer {
+  width: 12px;
+  flex: none;
+}
+
+.glyph {
+  width: 10px;
+  height: 10px;
+  flex: none;
+  border-radius: 2px;
+  background: #6b6b78;
+}
+
+/* A few type-distinct glyphs so the tree scans quickly. */
+.glyph[data-type='group'] { background: transparent; border: 1.5px solid #b48cff; border-radius: 2px; }
+.glyph[data-type='path'] { background: #7fd18b; }
+.glyph[data-type='text'] { background: #ffcf6b; border-radius: 1px; }
+.glyph[data-type='image'] { background: #6bbcff; }
+.glyph[data-type='boolean'] { background: #ff8cc6; border-radius: 50%; }
+.glyph[data-type='mask'] { background: repeating-linear-gradient(45deg, #999 0 2px, #444 2px 4px); }
+
+.name {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.eye {
+  color: #7fd18b;
+  min-width: 14px;
+  text-align: center;
+}
+
+.eye.off {
+  color: #666;
+}
+
+.empty {
+  padding: 12px 10px;
+  font-size: 12px;
+  color: #666;
+}

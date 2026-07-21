@@ -25,6 +25,7 @@ import {
   hitTest,
   layoutTextNode,
   layoutTextNodeGlyphs,
+  moveNode,
   MsdfAtlas,
   nudgeNodes,
   panBy,
@@ -59,6 +60,7 @@ import {
 } from '@rendera/core';
 import { WebGpuRenderer } from '@rendera/webgpu';
 import { createSampleDocument } from '../sample-scene';
+import { LayersPanel, type LayerReorder } from './layers-panel';
 
 type Status = 'pending' | 'ready' | 'unsupported';
 
@@ -100,7 +102,7 @@ export interface SceneSource {
  */
 @Component({
   selector: 'rendera-webgpu-scene',
-  imports: [],
+  imports: [LayersPanel],
   templateUrl: './webgpu-scene.html',
   styleUrl: './webgpu-scene.css',
   changeDetection: ChangeDetectionStrategy.OnPush,
@@ -115,6 +117,17 @@ export class WebGpuScene {
   readonly selectable = input(false);
   /** Show SVG / PNG export buttons in the toolbar (default off). */
   readonly exportable = input(false);
+  /** Show the layers panel beside the canvas (default off; implies selectable). */
+  readonly showLayers = input(false);
+
+  /** The document exposed to the layers panel. */
+  protected doc(): SceneDocument {
+    return this.document;
+  }
+  /** The revision counter exposed to the layers panel (recompute trigger). */
+  protected revValue(): number {
+    return this.rev();
+  }
 
   /** The current selection (ids + primary); drives the on-screen frame. */
   protected readonly selection = signal<Selection>(EMPTY_SELECTION);
@@ -502,6 +515,33 @@ export class WebGpuScene {
     this.selection.update((s) => pruneSelection(s, this.document));
     this.rev.update((v) => v + 1);
     this.draw();
+  }
+
+  // --- layers panel --------------------------------------------------------
+
+  /** A row was clicked in the layers panel: select it (shift/ctrl adds). */
+  protected onLayerSelect(event: { id: NodeId; additive: boolean }): void {
+    this.selection.update((s) => resolveSelectionClick(s, event.id, { additive: event.additive }));
+    this.rev.update((v) => v + 1);
+  }
+
+  /** Toggle a node's visibility (one undo entry); redraw. */
+  protected onLayerToggleVisible(id: NodeId): void {
+    const node = this.document.get(id) as SpatialNode | undefined;
+    if (!node) return;
+    this.document.update(id, { visible: node.visible === false });
+    this.rev.update((v) => v + 1);
+    this.draw();
+  }
+
+  /** Reorder / reparent a node via drag-drop (one undo entry); redraw. */
+  protected onLayerReorder(event: LayerReorder): void {
+    const run = (): boolean => moveNode(this.document, event.id, event.targetId, event.placement);
+    const moved = this.history ? this.history.batch(run) : run();
+    if (moved) {
+      this.rev.update((v) => v + 1);
+      this.draw();
+    }
   }
 
   /** Arrow-key nudge distance in world units (Shift = a coarser step). */
