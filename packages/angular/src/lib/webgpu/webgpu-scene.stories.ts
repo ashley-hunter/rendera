@@ -31,59 +31,8 @@ export const CrispImage: Story = {
   args: { scene: createImageSceneSource() },
 };
 
-/**
- * Interactive editing. The toolbar's **tools** — Select (V), Rectangle (R),
- * Ellipse (O), Pen (P) — draw new shapes: drag out a rect/ellipse, or click to
- * lay down pen points (click the first point or double-click to finish, Esc
- * cancels). Otherwise, **click** a shape to select it, or **drag from empty
- * space** to rubber-band select (shift adds); hit-testing respects transforms,
- * winding-rule fills, and stroke width. The selection shows an **oriented frame
- * with handles**: drag the body to **move**, a corner/edge to **scale** (shift =
- * keep aspect, alt = from centre), or the top grip to **rotate**. The frame stays
- * oriented with a rotated shape, so scaling never skews it. While you **move** a
- * shape it **snaps** its edges and centre to nearby shapes, drawing pink
- * alignment guides (hold Cmd/Ctrl to move freely). Select **two or more** shapes
- * and the toolbar grows **align** buttons; **three or more** adds **distribute**.
- * Select two or more shapes and the **boolean** buttons combine them non-
- * destructively (union / subtract / intersect / exclude) into one editable path.
- * **Keyboard**: arrow keys nudge the selection (Shift = a coarser step),
- * **Delete/Backspace** removes it, **Cmd/Ctrl+D** duplicates it, **Cmd/Ctrl+G**
- * groups (Shift to ungroup, world-preserving), **Cmd/Ctrl+C/X/V** copy / cut /
- * paste, and holding **Space** turns an empty-space drag into a pan. **Undo / Redo** (buttons or
- * Cmd/Ctrl+Z, +Shift to redo) step through every edit — a whole drag, or a
- * nudge/delete/duplicate/align, is a single undo. The **SVG** / **PNG** toolbar
- * buttons export the scene as a re-importable vector file and a raster capture.
- * The **layers panel** mirrors the document tree (front-to-back): click a row to
- * select it, toggle the dot to hide/show a node, and drag rows to reorder or drop
- * them into a group. The **properties inspector** edits the selection — opacity,
- * blend mode, and visibility for any selection; fill/stroke colour, stroke width,
- * and X/Y position for a single shape — each edit a single undo. **Rulers** line
- * the top/left with live world coordinates, and a **grid** shows through — moving
- * a shape snaps to it (shape alignment still wins). Wheel / pinch zooms.
- */
-export const Editor: Story = {
-  args: {
-    scene: createVectorScene(),
-    selectable: true,
-    exportable: true,
-    showLayers: true,
-    showInspector: true,
-    showRulers: true,
-    gridSize: 25,
-  },
-};
-
-/**
- * Inline text editing. The high-fidelity text scene, made editable: **double-
- * click** any line to edit it in place — an overlay textarea sits exactly over
- * the glyphs (matching position, rotation, scale, and colour), and the canvas
- * text hides while you type. **Enter** commits (Shift+Enter for a newline),
- * **Esc** cancels; a commit re-shapes the outline and is a single undo. Select a
- * line and the inspector edits its fill, size, and position too.
- */
-export const TextEditing: Story = {
-  args: { scene: createTextScene(), selectable: true, exportable: true, showInspector: true },
-};
+// The interactive editor stories live in `editor.stories.ts` (title "Editor"),
+// one per capability. These stories cover the rendering engine itself.
 
 /**
  * Image & pattern fills (the fourth paint kind): one asymmetric tile used four
