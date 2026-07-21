@@ -13,8 +13,9 @@ import type { Bounds } from './bounds';
 import type { NodeId } from './id';
 import type { SceneDocument } from './document';
 import { invert, transformPoint } from './matrix';
-import type { PathNode, SceneNode } from './node';
-import { flattenPath, pointInPath, type Vec2 } from './path';
+import type { PathNode, SceneNode, SpatialNode } from './node';
+import { flattenPath, pointInPath } from './path';
+import type { Vec2 } from './vec2';
 
 /** Options for `hitTest`. */
 export interface HitTestOptions {
@@ -94,7 +95,9 @@ export function hitTest(doc: SceneDocument, worldPoint: Vec2, options: HitTestOp
 
   const visit = (id: NodeId): NodeId | null => {
     const node = doc.get(id);
-    if (!node || node.visible === false || node.type === 'mask') return null;
+    if (!node || node.type === 'mask') return null;
+    const sp = node as SpatialNode;
+    if (sp.visible === false) return null;
 
     const world = doc.getWorldMatrix(id);
     const inv = invert(world);
@@ -102,7 +105,7 @@ export function hitTest(doc: SceneDocument, worldPoint: Vec2, options: HitTestOp
     const local = transformPoint(inv, worldPoint);
 
     // A clip culls the node and its whole subtree outside the clip region.
-    if (node.clip && !pointInPath(node.clip.path, local, node.clip.rule ?? 'nonzero')) return null;
+    if (sp.clip && !pointInPath(sp.clip.path, local, sp.clip.rule ?? 'nonzero')) return null;
 
     // Children are painted on top of the node's own content — test them first,
     // last sibling (top-most) first.
@@ -133,22 +136,4 @@ export function selectionBounds(doc: SceneDocument, ids: Iterable<NodeId>): Boun
       : b;
   }
   return out;
-}
-
-/** An immutable selection: a set of node ids. */
-export type Selection = ReadonlySet<NodeId>;
-
-/** The empty selection. */
-export const EMPTY_SELECTION: Selection = new Set();
-
-/** A new selection with `id` toggled in or out. */
-export function toggleSelection(sel: Selection, id: NodeId): Selection {
-  const next = new Set(sel);
-  if (!next.delete(id)) next.add(id);
-  return next;
-}
-
-/** A new selection: `id` alone (a plain click), or the empty selection for null. */
-export function selectOnly(id: NodeId | null): Selection {
-  return id ? new Set([id]) : EMPTY_SELECTION;
 }

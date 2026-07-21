@@ -6,6 +6,7 @@ import { createClipMaskScene } from './clip-mask-scene';
 import { createEffectsScene } from './effects-scene';
 import { createGradientScene } from './gradient-scene';
 import { createImageSceneSource } from './image-scene';
+import { createPatternScene } from './pattern-scene';
 import { createSvgScene } from './svg-scene';
 import { createTextScene } from './text-scene';
 import { createVectorScene } from './vector-scene';
@@ -28,6 +29,17 @@ export const Default: Story = { args: {} };
  */
 export const CrispImage: Story = {
   args: { scene: createImageSceneSource() },
+};
+
+/**
+ * Image & pattern fills (the fourth paint kind): one asymmetric tile used four
+ * ways — a single placed image (`pad`), a tiled `repeat` pattern, a mirror-tiled
+ * `reflect` pattern, and the pattern clipping to a stroked star and an ellipse.
+ * Each rides the analytic vector fill, so it stays crisp at any zoom; zoom out
+ * and the minified tiles mip-filter cleanly instead of shimmering.
+ */
+export const PatternFills: Story = {
+  args: { scene: createPatternScene() },
 };
 
 /**

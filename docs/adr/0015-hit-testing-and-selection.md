@@ -34,10 +34,11 @@ Add owned, pure functions over `SceneDocument` in `@rendera/core`:
     (click-selects the whole group) instead of the leaf.
 - **`selectionBounds(doc, ids)`** unions the world-space AABBs of the given nodes
   — the box a front-end draws as a selection frame.
-- **Selection state** is just a `ReadonlySet<NodeId>` (`Selection`), with pure
-  helpers `toggleSelection` (shift-click) and `selectOnly` (plain click / clear).
-  Immutable, so it drops straight into any state model with structural change
-  detection.
+- **Selection state already exists** (`selection.ts`: the immutable
+  `Selection = { ids, primary }` with `resolveSelectionClick`, `toggleSelection`,
+  …). `hitTest` produces the id that feeds it, so a click is
+  `resolveSelectionClick(sel, hitTest(doc, pt), { additive })`. This ADR adds only
+  the geometry (`hitTest`, `selectionBounds`), not new selection state.
 
 ## Consequences
 

@@ -1,11 +1,5 @@
 import { SceneDocument } from './document';
-import {
-  EMPTY_SELECTION,
-  hitTest,
-  selectionBounds,
-  selectOnly,
-  toggleSelection,
-} from './hit-test';
+import { hitTest, selectionBounds } from './hit-test';
 import { createSequentialIdFactory } from './id';
 import type { GroupNode, PathNode } from './node';
 import { ellipsePath, rectPath } from './path';
@@ -93,17 +87,5 @@ describe('selectionBounds', () => {
     const box = selectionBounds(d, [a.id, b.id])!;
     expect(box).toEqual({ minX: 0, minY: 0, maxX: 100, maxY: 50 });
     expect(selectionBounds(d, [])).toBeNull();
-  });
-});
-
-describe('selection helpers', () => {
-  it('toggle adds then removes an id', () => {
-    const s1 = toggleSelection(EMPTY_SELECTION, 'n1');
-    expect([...s1]).toEqual(['n1']);
-    expect([...toggleSelection(s1, 'n1')]).toEqual([]);
-  });
-  it('selectOnly replaces the selection (or clears on null)', () => {
-    expect([...selectOnly('n2')]).toEqual(['n2']);
-    expect([...selectOnly(null)]).toEqual([]);
   });
 });

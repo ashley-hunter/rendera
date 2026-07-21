@@ -89,7 +89,7 @@ class Defs {
       this.items.push(
         `<linearGradient id="${id}" gradientUnits="userSpaceOnUse" x1="${num(g.start.x)}" y1="${num(g.start.y)}" x2="${num(g.end.x)}" y2="${num(g.end.y)}"${spread}>${stops}</linearGradient>`
       );
-    } else {
+    } else if (g.type === 'radial-gradient') {
       // radial: end circle → (cx,cy,r), start circle → focal (fx,fy,fr).
       this.items.push(
         `<radialGradient id="${id}" gradientUnits="userSpaceOnUse" cx="${num(g.end.center.x)}" cy="${num(g.end.center.y)}" r="${num(g.end.radius)}" fx="${num(g.start.center.x)}" fy="${num(g.start.center.y)}" fr="${num(g.start.radius)}"${spread}>${stops}</radialGradient>`
