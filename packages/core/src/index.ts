@@ -18,6 +18,7 @@ export * from './lib/path';
 export * from './lib/stroke';
 export * from './lib/text';
 export * from './lib/svg';
+export * from './lib/png';
 export * from './lib/render-list';
 
 // Transform math. `matrix` also defines `approxEquals`; it is re-exported here

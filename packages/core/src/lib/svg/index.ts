@@ -7,6 +7,7 @@
  */
 
 export { importSvg, type SvgImportOptions, type SvgImportResult, type FontResolver } from './import';
+export { exportSvg, pathToData, type SvgExportOptions } from './export';
 export { parsePathData } from './path-data';
 export { parseTransform } from './transform-attr';
 export { parseColor } from './color';

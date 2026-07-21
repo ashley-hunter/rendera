@@ -13,6 +13,7 @@
 import {
   blendModeIndex,
   compose,
+  encodePng,
   IDENTITY,
   invert,
   normalizedStops,
@@ -2133,6 +2134,29 @@ export class WebGpuRenderer {
     buffer.destroy();
 
     return { data, width: this.width, height: this.height, format: this.format, bytesPerRow };
+  }
+
+  /**
+   * Encode the current frame as PNG bytes: reads back the presented pixels,
+   * packs them tight as top-to-bottom RGBA (unswizzling BGRA targets and
+   * dropping the row padding), and encodes (see core `encodePng`).
+   */
+  async toPng(): Promise<Uint8Array> {
+    const rb = await this.readback();
+    const { width, height, bytesPerRow } = rb;
+    const bgra = rb.format.startsWith('bgra');
+    const rgba = new Uint8Array(width * height * 4);
+    for (let y = 0; y < height; y++) {
+      for (let x = 0; x < width; x++) {
+        const s = y * bytesPerRow + x * 4;
+        const d = (y * width + x) * 4;
+        rgba[d] = bgra ? rb.data[s + 2] : rb.data[s];
+        rgba[d + 1] = rb.data[s + 1];
+        rgba[d + 2] = bgra ? rb.data[s] : rb.data[s + 2];
+        rgba[d + 3] = rb.data[s + 3];
+      }
+    }
+    return encodePng(rgba, width, height);
   }
 
   destroy(): void {
