@@ -28,6 +28,7 @@ export * from './lib/align';
 export * from './lib/color';
 export * from './lib/grouping';
 export * from './lib/clipboard';
+export * from './lib/ruler';
 export * from './lib/render-list';
 
 // Transform math. `matrix` also defines `approxEquals`; it is re-exported here

@@ -53,6 +53,31 @@
       (pointercancel)="onPointerUp($event)"
       (wheel)="onWheel($event)"
     ></canvas>
+    @if (gridLines(); as g) {
+      <svg class="grid" aria-hidden="true">
+        @for (x of g.xs; track $index) {
+          <line [attr.x1]="x" y1="0" [attr.x2]="x" [attr.y2]="g.h" />
+        }
+        @for (y of g.ys; track $index) {
+          <line x1="0" [attr.y1]="y" [attr.x2]="g.w" [attr.y2]="y" />
+        }
+      </svg>
+    }
+    @if (rulers(); as r) {
+      <svg class="ruler ruler-h" aria-hidden="true">
+        @for (t of r.h; track $index) {
+          <line [attr.x1]="t.p" y1="13" [attr.x2]="t.p" y2="20" />
+          <text [attr.x]="t.p + 3" y="10">{{ t.label }}</text>
+        }
+      </svg>
+      <svg class="ruler ruler-v" aria-hidden="true">
+        @for (t of r.v; track $index) {
+          <line x1="13" [attr.y1]="t.p" x2="20" [attr.y2]="t.p" />
+          <text x="2" [attr.y]="t.p - 3">{{ t.label }}</text>
+        }
+      </svg>
+      <div class="ruler-corner"></div>
+    }
     @if (selectable()) {
       <svg class="handles" aria-hidden="true">
         @if (marquee(); as m) {

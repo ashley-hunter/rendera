@@ -72,4 +72,26 @@ describe('snapMove', () => {
     const res = snapMove(d, [], null, vec2(5, 5), { threshold: 6 });
     expect(res).toEqual({ delta: { x: 5, y: 5 }, guides: [] });
   });
+
+  it('snaps the box edge to the grid when no shape wins', () => {
+    const d = doc();
+    const moving = rect(d, 0, 0); // box 0..40; grid 25
+    const res = snapMove(d, [moving.id], d.getWorldBounds(moving.id)!, vec2(23, 11), { threshold: 6, grid: 25, targets: [] });
+    // box.minX after dx=23 is 23 → nearest 25-line is 25 (adjust +2).
+    expect(res.delta.x).toBeCloseTo(25);
+    // box.minY after dy=11 is 11 → nearest 25-line is 0 (adjust -11 → 0).
+    expect(res.delta.y).toBeCloseTo(0);
+    expect(res.guides).toHaveLength(0); // the grid draws itself
+  });
+
+  it('lets a shape snap override the grid on that axis', () => {
+    const d = doc();
+    const moving = rect(d, 0, 0);
+    // Target left edge at 24 (2px from box.minX after dx=22); grid 25 would pull to 25.
+    const res = snapMove(d, [moving.id], d.getWorldBounds(moving.id)!, vec2(22, 0), {
+      threshold: 6, grid: 25, centers: false, targets: [box(24, 0, 64, 20)],
+    });
+    expect(res.delta.x).toBeCloseTo(24); // shape (24) beats grid (25)
+    expect(res.guides.find((g) => g.axis === 'x')!.position).toBeCloseTo(24);
+  });
 });

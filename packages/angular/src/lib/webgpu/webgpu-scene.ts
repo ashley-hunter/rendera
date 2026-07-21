@@ -34,12 +34,14 @@ import {
   makeBoolean,
   moveNode,
   MsdfAtlas,
+  niceStep,
   nodesInBox,
   nudgeNodes,
   panBy,
   pruneSelection,
   RenderaFont,
   resolveSelectionClick,
+  rulerTicks,
   screenToWorld,
   selectionBounds,
   selectionFrame,
@@ -135,6 +137,13 @@ export class WebGpuScene {
   readonly showLayers = input(false);
   /** Show the properties inspector beside the canvas (default off; implies selectable). */
   readonly showInspector = input(false);
+  /** Show coordinate rulers along the top/left of the stage (default off). */
+  readonly showRulers = input(false);
+  /** Grid spacing in world units; 0 (default) hides the grid and disables grid-snap. */
+  readonly gridSize = input(0);
+
+  /** Stage size in CSS px (drives the rulers/grid; updated on size + resize). */
+  private readonly stageSize = signal<{ w: number; h: number }>({ w: 0, h: 0 });
 
   /** The document exposed to the layers panel. */
   protected doc(): SceneDocument {
@@ -235,6 +244,35 @@ export class WebGpuScene {
       const b = worldToScreen(cam, g.axis === 'x' ? vec2(g.position, g.end) : vec2(g.end, g.position));
       return { x1: a.x, y1: a.y, x2: b.x, y2: b.y };
     });
+  });
+
+  /** Ruler ticks (screen px + world label) for the top and left rulers. */
+  protected readonly rulers = computed(() => {
+    if (!this.showRulers()) return null;
+    const cam = this.camera();
+    const { w, h } = this.stageSize();
+    if (w === 0 || h === 0) return null;
+    // A "nice" world step targeting ~72 px between labelled ticks.
+    const step = niceStep((72 / cam.zoom) || 1);
+    const left = screenToWorld(cam, vec2(0, 0));
+    const right = screenToWorld(cam, vec2(w, h));
+    const h_ = rulerTicks(left.x, right.x, step).map((wx) => ({ p: worldToScreen(cam, vec2(wx, 0)).x, label: fmt(wx) }));
+    const v_ = rulerTicks(left.y, right.y, step).map((wy) => ({ p: worldToScreen(cam, vec2(0, wy)).y, label: fmt(wy) }));
+    return { h: h_, v: v_ };
+  });
+
+  /** Grid lines projected to CSS px, or null when the grid is off. */
+  protected readonly gridLines = computed(() => {
+    const grid = this.gridSize();
+    if (grid <= 0) return null;
+    const cam = this.camera();
+    const { w, h } = this.stageSize();
+    if (w === 0 || h === 0) return null;
+    const tl = screenToWorld(cam, vec2(0, 0));
+    const br = screenToWorld(cam, vec2(w, h));
+    const xs = rulerTicks(tl.x, br.x, grid).map((wx) => worldToScreen(cam, vec2(wx, 0)).x);
+    const ys = rulerTicks(tl.y, br.y, grid).map((wy) => worldToScreen(cam, vec2(0, wy)).y);
+    return { xs, ys, w, h };
   });
 
   private document: SceneDocument = createSampleDocument();
@@ -472,6 +510,7 @@ export class WebGpuScene {
       if (this.dragHandle === 'move' && !(event.ctrlKey || event.metaKey)) {
         const res = snapMove(this.document, [...this.dragSnapshot.keys()], this.dragBounds, vec2(delta.e, delta.f), {
           threshold: 6 / this.camera().zoom,
+          grid: this.gridSize(),
         });
         delta = { a: 1, b: 0, c: 0, d: 1, e: res.delta.x, f: res.delta.y };
         this.snapGuides.set(res.guides);
@@ -913,6 +952,7 @@ export class WebGpuScene {
     const rect = canvas.getBoundingClientRect();
     canvas.width = Math.max(1, Math.round(rect.width * dpr));
     canvas.height = Math.max(1, Math.round(rect.height * dpr));
+    this.stageSize.set({ w: rect.width, h: rect.height });
   }
 
   /**
@@ -955,4 +995,9 @@ export class WebGpuScene {
       this.fps.update((v) => (v ? Math.round(v * 0.85 + instant * 0.15) : Math.round(instant)));
     }
   }
+}
+
+/** Compact ruler-tick label: rounded to 2 dp (trailing zeros dropped by String). */
+function fmt(v: number): string {
+  return String(Math.round(v * 100) / 100);
 }

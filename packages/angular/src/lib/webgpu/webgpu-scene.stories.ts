@@ -54,11 +54,20 @@ export const CrispImage: Story = {
  * select it, toggle the dot to hide/show a node, and drag rows to reorder or drop
  * them into a group. The **properties inspector** edits the selection — opacity,
  * blend mode, and visibility for any selection; fill/stroke colour, stroke width,
- * and X/Y position for a single shape — each edit a single undo. Wheel / pinch
- * zooms.
+ * and X/Y position for a single shape — each edit a single undo. **Rulers** line
+ * the top/left with live world coordinates, and a **grid** shows through — moving
+ * a shape snaps to it (shape alignment still wins). Wheel / pinch zooms.
  */
 export const Editor: Story = {
-  args: { scene: createVectorScene(), selectable: true, exportable: true, showLayers: true, showInspector: true },
+  args: {
+    scene: createVectorScene(),
+    selectable: true,
+    exportable: true,
+    showLayers: true,
+    showInspector: true,
+    showRulers: true,
+    gridSize: 25,
+  },
 };
 
 /**

@@ -40,6 +40,9 @@ export interface SnapOptions {
   /** Explicit target boxes to align to; defaults to every root-level node not
    *  being moved. Pass this to align against a custom set (e.g. the canvas). */
   readonly targets?: readonly Bounds[];
+  /** When set (> 0), snap an axis to the nearest grid multiple whenever no shape
+   *  alignment wins on that axis. Shape snapping always takes priority. */
+  readonly grid?: number;
 }
 
 /** The snapped translation plus the guides to draw for it. */
@@ -117,14 +120,21 @@ export function snapMove(
   const ids = [...movingIds];
   if (!moving || ids.length === 0) return { delta, guides: [] };
   const centers = options.centers ?? true;
+  const grid = options.grid && options.grid > 0 ? options.grid : 0;
   const targets = options.targets ?? defaultTargets(doc, ids);
-  if (targets.length === 0) return { delta, guides: [] };
+  if (targets.length === 0 && !grid) return { delta, guides: [] };
 
   const box = translateBounds(moving, delta.x, delta.y);
   const sx = axisSnap(box.minX, box.maxX, targets.map((t) => [t.minX, t.maxX]), options.threshold, centers);
   const sy = axisSnap(box.minY, box.maxY, targets.map((t) => [t.minY, t.maxY]), options.threshold, centers);
 
-  const out = vec2(delta.x + (sx?.adjust ?? 0), delta.y + (sy?.adjust ?? 0));
+  // Shape snap wins per axis; otherwise fall back to the grid (snap the box's
+  // near edge to the nearest grid line). The grid draws itself, so no guide.
+  const gridAdjust = (edge: number): number => (grid ? Math.round(edge / grid) * grid - edge : 0);
+  const ax = sx ? sx.adjust : gridAdjust(box.minX);
+  const ay = sy ? sy.adjust : gridAdjust(box.minY);
+
+  const out = vec2(delta.x + ax, delta.y + ay);
   const snapped = translateBounds(moving, out.x, out.y);
 
   const guides: SnapGuide[] = [];

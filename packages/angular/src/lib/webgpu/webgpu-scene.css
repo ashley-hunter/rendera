@@ -89,12 +89,66 @@
   touch-action: none;
 }
 
-.handles {
+.handles,
+.grid {
   position: absolute;
   inset: 0;
   width: 100%;
   height: 100%;
   overflow: visible;
+  pointer-events: none;
+}
+
+.grid line {
+  stroke: rgba(120, 140, 170, 0.16);
+  stroke-width: 1;
+  shape-rendering: crispEdges;
+}
+
+/* Coordinate rulers overlaid on the top / left edges. */
+.ruler {
+  position: absolute;
+  pointer-events: none;
+  background: rgba(20, 20, 24, 0.82);
+  font-family: ui-monospace, monospace;
+}
+
+.ruler-h {
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 20px;
+  border-bottom: 1px solid #33333a;
+}
+
+.ruler-v {
+  top: 0;
+  left: 0;
+  width: 20px;
+  height: 100%;
+  border-right: 1px solid #33333a;
+}
+
+.ruler line {
+  stroke: #667;
+  stroke-width: 1;
+  shape-rendering: crispEdges;
+}
+
+.ruler text {
+  fill: #99a;
+  font-size: 9px;
+}
+
+.ruler-corner {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 20px;
+  height: 20px;
+  background: #16161a;
+  border-right: 1px solid #33333a;
+  border-bottom: 1px solid #33333a;
   pointer-events: none;
 }
 
