@@ -2,6 +2,7 @@ import {
   afterNextRender,
   ChangeDetectionStrategy,
   Component,
+  computed,
   ElementRef,
   input,
   signal,
@@ -10,21 +11,29 @@ import {
 import {
   buildRenderList,
   createCamera,
+  EMPTY_SELECTION,
+  exportSvg,
   fitBounds,
+  hitTest,
   layoutTextNode,
   layoutTextNodeGlyphs,
   MsdfAtlas,
   panBy,
   RenderaFont,
+  resolveSelectionClick,
+  screenToWorld,
+  selectionBounds,
   vec2,
   ViewportGesture,
   withPixelRatio,
+  worldToScreen,
   zoomAround,
   type Camera,
   type MsdfNodeLayout,
   type NodeId,
   type Path,
   type SceneDocument,
+  type Selection,
   type TextNode,
   type Vec2,
   type ViewportGestureChange,
@@ -83,6 +92,36 @@ export class WebGpuScene {
 
   /** Optional scene to render; defaults to the shared sample document. */
   readonly scene = input<SceneSource | null>(null);
+  /** Click to select the top-most shape and draw its bounding box (default off). */
+  readonly selectable = input(false);
+  /** Show SVG / PNG export buttons in the toolbar (default off). */
+  readonly exportable = input(false);
+
+  /** The current selection (ids + primary); drives the on-screen bounding box. */
+  protected readonly selection = signal<Selection>(EMPTY_SELECTION);
+  private pointerMoved = false;
+
+  /** The selection frame in CSS px over the stage, or null when nothing is
+   *  selected. Recomputes as the camera or selection changes. */
+  protected readonly selectionBox = computed(() => {
+    const sel = this.selection();
+    if (sel.ids.size === 0) return null;
+    const b = selectionBounds(this.document, sel.ids);
+    if (!b) return null;
+    const cam = this.camera();
+    let minX = Infinity;
+    let minY = Infinity;
+    let maxX = -Infinity;
+    let maxY = -Infinity;
+    for (const c of [vec2(b.minX, b.minY), vec2(b.maxX, b.minY), vec2(b.minX, b.maxY), vec2(b.maxX, b.maxY)]) {
+      const p = worldToScreen(cam, c);
+      minX = Math.min(minX, p.x);
+      minY = Math.min(minY, p.y);
+      maxX = Math.max(maxX, p.x);
+      maxY = Math.max(maxY, p.y);
+    }
+    return { left: minX, top: minY, width: maxX - minX, height: maxY - minY };
+  });
 
   private document: SceneDocument = createSampleDocument();
   /** Shaped, local-space glyph outlines per text node (async; empty until ready). */
@@ -270,6 +309,7 @@ export class WebGpuScene {
     } catch {
       // Ignore non-active pointers (e.g. synthetic events).
     }
+    this.pointerMoved = false;
     this.gesture.down(event.pointerId, this.toCanvas(event, canvas));
   }
 
@@ -280,6 +320,7 @@ export class WebGpuScene {
     }
     const change = this.gesture.move(event.pointerId, this.toCanvas(event, canvas));
     if (change) {
+      this.pointerMoved = true;
       this.beginInteraction();
       this.applyGesture(change);
     }
@@ -287,6 +328,36 @@ export class WebGpuScene {
 
   protected onPointerUp(event: PointerEvent): void {
     this.gesture.up(event.pointerId);
+    // A click (no drag) selects the top-most shape; empty space clears; shift
+    // adds/removes. Drag is reserved for panning.
+    const canvas = this.canvasRef()?.nativeElement;
+    if (this.selectable() && !this.pointerMoved && canvas) {
+      const world = screenToWorld(this.camera(), this.toCanvas(event, canvas));
+      const hit = hitTest(this.document, world, { tolerance: 6 / this.camera().zoom, select: 'outermost' });
+      this.selection.update((s) => resolveSelectionClick(s, hit, { additive: event.shiftKey }));
+    }
+    this.pointerMoved = false;
+  }
+
+  /** Download the scene as an SVG file (vector, re-importable). */
+  protected exportSvgFile(): void {
+    this.download('scene.svg', new Blob([exportSvg(this.document)], { type: 'image/svg+xml' }));
+  }
+
+  /** Download the current frame as a PNG file. */
+  protected async exportPngFile(): Promise<void> {
+    if (!this.renderer) return;
+    const bytes = await this.renderer.toPng();
+    this.download('scene.png', new Blob([bytes as BlobPart], { type: 'image/png' }));
+  }
+
+  private download(name: string, blob: Blob): void {
+    const url = URL.createObjectURL(blob);
+    const a = globalThis.document.createElement('a');
+    a.href = url;
+    a.download = name;
+    a.click();
+    URL.revokeObjectURL(url);
   }
 
   protected onWheel(event: WheelEvent): void {

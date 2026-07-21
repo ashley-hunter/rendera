@@ -1,7 +1,13 @@
 <div class="webgpu-scene">
   <div class="toolbar">
     <button type="button" (click)="fit()" [disabled]="renderState() !== 'ready'">Fit</button>
-    <span class="hint">drag = pan · wheel / pinch = zoom · rendered by @rendera/webgpu</span>
+    @if (exportable()) {
+      <button type="button" (click)="exportSvgFile()" [disabled]="renderState() !== 'ready'">SVG</button>
+      <button type="button" (click)="exportPngFile()" [disabled]="renderState() !== 'ready'">PNG</button>
+    }
+    <span class="hint">
+      @if (selectable()) { click = select · }drag = pan · wheel / pinch = zoom
+    </span>
     @if (renderState() === 'ready') {
       <span class="fps">{{ fps() }} fps</span>
     }
@@ -16,6 +22,15 @@
       (pointercancel)="onPointerUp($event)"
       (wheel)="onWheel($event)"
     ></canvas>
+    @if (selectable() && selectionBox(); as box) {
+      <div
+        class="selection-frame"
+        [style.left.px]="box.left"
+        [style.top.px]="box.top"
+        [style.width.px]="box.width"
+        [style.height.px]="box.height"
+      ></div>
+    }
     @if (renderState() === 'unsupported') {
       <div class="overlay">
         <p>WebGPU is not available in this browser.</p>

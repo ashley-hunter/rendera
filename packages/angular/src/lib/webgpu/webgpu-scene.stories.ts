@@ -32,6 +32,17 @@ export const CrispImage: Story = {
 };
 
 /**
+ * Interactive editing: **click** a shape to select it (empty space clears,
+ * shift-click adds/removes) — hit-testing respects transforms, winding-rule
+ * fills, and stroke width, and a bounding box tracks the selection as you pan and
+ * zoom. The **SVG** and **PNG** toolbar buttons export the scene as a
+ * (re-importable) vector file and a raster capture. Drag still pans, wheel zooms.
+ */
+export const Editor: Story = {
+  args: { scene: createVectorScene(), selectable: true, exportable: true },
+};
+
+/**
  * Image & pattern fills (the fourth paint kind): one asymmetric tile used four
  * ways — a single placed image (`pad`), a tiled `repeat` pattern, a mirror-tiled
  * `reflect` pattern, and the pattern clipping to a stroked star and an ellipse.
