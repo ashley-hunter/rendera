@@ -12,12 +12,15 @@ import {
   alignNodes,
   applyTransform,
   buildRenderList,
+  clipboardHasContent,
+  copyNodes,
   createCamera,
   createSelection,
   distributeNodes,
   deleteNodes,
   dragTransform,
   duplicateNodes,
+  pasteNodes,
   EMPTY_SELECTION,
   exportSvg,
   fitBounds,
@@ -52,6 +55,7 @@ import {
   type BooleanOp,
   type Bounds,
   type Camera,
+  type Clipboard,
   type DistributeAxis,
   type HandleId,
   type Mat2D,
@@ -165,6 +169,8 @@ export class WebGpuScene {
 
   /** Whether Space is held (temporarily switches empty-drag from marquee to pan). */
   private panKey = false;
+  /** In-memory clipboard (Cmd/Ctrl+C/X → copy, +V → paste). */
+  private clipboard: Clipboard | null = null;
   /** Marquee start point in canvas px (null when not rubber-band selecting). */
   private marqueeStart: Vec2 | null = null;
   private marqueeAdditive = false;
@@ -711,6 +717,22 @@ export class WebGpuScene {
       else this.groupSelection();
       return;
     }
+    if (mod && (key === 'c' || key === 'C')) {
+      event.preventDefault();
+      this.copySelection();
+      return;
+    }
+    if (mod && (key === 'x' || key === 'X')) {
+      event.preventDefault();
+      this.copySelection();
+      this.deleteSelection();
+      return;
+    }
+    if (mod && (key === 'v' || key === 'V')) {
+      event.preventDefault();
+      this.pasteClipboard();
+      return;
+    }
     if (key === 'Delete' || key === 'Backspace') {
       event.preventDefault();
       this.deleteSelection();
@@ -737,6 +759,23 @@ export class WebGpuScene {
     if (!ids.length) return;
     const step = coarse ? WebGpuScene.NUDGE_SHIFT : WebGpuScene.NUDGE;
     nudgeNodes(this.document, ids, dir.x * step, dir.y * step);
+    this.rev.update((v) => v + 1);
+    this.draw();
+  }
+
+  /** Copy the selection's subtrees to the in-memory clipboard. */
+  private copySelection(): void {
+    const ids = [...this.selection().ids];
+    if (!ids.length) return;
+    this.clipboard = copyNodes(this.document, ids);
+  }
+
+  /** Paste the clipboard (offset), selecting the new copies. One undo entry. */
+  private pasteClipboard(): void {
+    if (!clipboardHasContent(this.clipboard)) return;
+    const clip = this.clipboard;
+    const pasted = this.history ? this.history.batch(() => pasteNodes(this.document, clip)) : pasteNodes(this.document, clip);
+    if (pasted.length) this.selection.set(createSelection(pasted));
     this.rev.update((v) => v + 1);
     this.draw();
   }

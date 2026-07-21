@@ -36,7 +36,7 @@
       }
     }
     <span class="hint">
-      @if (selectable()) { click / drag = select · space-drag = pan · arrows = nudge · ⌫ = delete · ⌘D = duplicate · ⌘G = group · }@if (!selectable()) { drag = pan · }wheel / pinch = zoom
+      @if (selectable()) { click / drag = select · space-drag = pan · arrows = nudge · ⌫ = delete · ⌘D = duplicate · ⌘G = group · ⌘C/V = copy/paste · }@if (!selectable()) { drag = pan · }wheel / pinch = zoom
     </span>
     @if (renderState() === 'ready') {
       <span class="fps">{{ fps() }} fps</span>
