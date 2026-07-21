@@ -101,6 +101,13 @@
   shape-rendering: crispEdges;
 }
 
+.handles .marquee {
+  fill: rgba(74, 163, 255, 0.12);
+  stroke: #4aa3ff;
+  stroke-width: 1;
+  shape-rendering: crispEdges;
+}
+
 .overlay {
   position: absolute;
   inset: 0;

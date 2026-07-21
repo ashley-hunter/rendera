@@ -125,6 +125,46 @@ export function hitTest(doc: SceneDocument, worldPoint: Vec2, options: HitTestOp
   return null;
 }
 
+/** Options for `nodesInBox`. */
+export interface MarqueeOptions {
+  /**
+   * `false` (default): a node is picked if its world box *intersects* the
+   * marquee (touch-to-select). `true`: only nodes wholly *contained* by the
+   * marquee are picked (the stricter "must enclose" rubber-band).
+   */
+  readonly contained?: boolean;
+  /** Include nodes whose `visible` is false (default false — skip hidden). */
+  readonly includeHidden?: boolean;
+}
+
+/** Whether two axis-aligned boxes overlap (share any area). */
+function boxesIntersect(a: Bounds, b: Bounds): boolean {
+  return !(a.maxX < b.minX || a.minX > b.maxX || a.maxY < b.minY || a.minY > b.maxY);
+}
+
+/** Whether `inner` lies wholly within `outer`. */
+function boxContains(outer: Bounds, inner: Bounds): boolean {
+  return inner.minX >= outer.minX && inner.maxX <= outer.maxX && inner.minY >= outer.minY && inner.maxY <= outer.maxY;
+}
+
+/**
+ * The top-level nodes selected by a marquee (rubber-band) `box` in world space,
+ * front-to-back is not implied — ids are returned in document order. By default
+ * a node is picked when its world box touches the marquee; pass `contained` to
+ * require full enclosure. Hidden nodes and nodes without geometry are skipped.
+ */
+export function nodesInBox(doc: SceneDocument, box: Bounds, options: MarqueeOptions = {}): NodeId[] {
+  const out: NodeId[] = [];
+  for (const child of doc.getChildren(doc.root.id)) {
+    const sp = child as SpatialNode;
+    if (!options.includeHidden && sp.visible === false) continue;
+    const b = doc.getWorldBounds(child.id);
+    if (!b) continue;
+    if (options.contained ? boxContains(box, b) : boxesIntersect(box, b)) out.push(child.id);
+  }
+  return out;
+}
+
 /** The union world-space AABB of the given nodes, or `null` if none has bounds. */
 export function selectionBounds(doc: SceneDocument, ids: Iterable<NodeId>): Bounds | null {
   let out: Bounds | null = null;

@@ -1,5 +1,5 @@
 import { SceneDocument } from './document';
-import { hitTest, selectionBounds } from './hit-test';
+import { hitTest, nodesInBox, selectionBounds } from './hit-test';
 import { createSequentialIdFactory } from './id';
 import type { GroupNode, PathNode } from './node';
 import { ellipsePath, rectPath } from './path';
@@ -87,5 +87,43 @@ describe('selectionBounds', () => {
     const box = selectionBounds(d, [a.id, b.id])!;
     expect(box).toEqual({ minX: 0, minY: 0, maxX: 100, maxY: 50 });
     expect(selectionBounds(d, [])).toBeNull();
+  });
+});
+
+describe('nodesInBox (marquee)', () => {
+  const scene = () => {
+    const d = doc();
+    // Three 20x20 rects at x = 0, 100, 200 (all y 0..20).
+    const a = d.insert<PathNode>({ type: 'path', name: 'a', path: rectPath(0, 0, 20, 20), fill: { type: 'solid', color: { r: 1, g: 1, b: 1, a: 1 } } });
+    const b = d.insert<PathNode>({ type: 'path', name: 'b', path: rectPath(0, 0, 20, 20), fill: { type: 'solid', color: { r: 1, g: 1, b: 1, a: 1 } } });
+    const c = d.insert<PathNode>({ type: 'path', name: 'c', path: rectPath(0, 0, 20, 20), fill: { type: 'solid', color: { r: 1, g: 1, b: 1, a: 1 } } });
+    d.update(b.id, tf(100, 0));
+    d.update(c.id, tf(200, 0));
+    return { d, a: a.id, b: b.id, c: c.id };
+  };
+
+  it('picks nodes whose world box touches the marquee (intersect, default)', () => {
+    const { d, a, b } = scene();
+    // A box from x=10..110 clips into a (0..20) and b (100..120).
+    expect(nodesInBox(d, { minX: 10, minY: 0, maxX: 110, maxY: 20 })).toEqual([a, b]);
+  });
+
+  it('requires full enclosure with `contained`', () => {
+    const { d, b } = scene();
+    // The same span only *encloses* b fully (a is clipped, so excluded).
+    expect(nodesInBox(d, { minX: 10, minY: -5, maxX: 130, maxY: 25 }, { contained: true })).toEqual([b]);
+  });
+
+  it('skips hidden nodes unless asked', () => {
+    const { d, a, b } = scene();
+    d.update(a, { visible: false });
+    const box = { minX: -5, minY: -5, maxX: 125, maxY: 25 };
+    expect(nodesInBox(d, box)).toEqual([b]);
+    expect(nodesInBox(d, box, { includeHidden: true })).toEqual([a, b]);
+  });
+
+  it('returns empty when the marquee hits nothing', () => {
+    const { d } = scene();
+    expect(nodesInBox(d, { minX: 300, minY: 300, maxX: 400, maxY: 400 })).toEqual([]);
   });
 });

@@ -27,6 +27,7 @@ import {
   layoutTextNodeGlyphs,
   moveNode,
   MsdfAtlas,
+  nodesInBox,
   nudgeNodes,
   panBy,
   pruneSelection,
@@ -150,6 +151,14 @@ export class WebGpuScene {
 
   /** Live alignment guides (world space) shown while a move-drag snaps. */
   private readonly snapGuides = signal<readonly SnapGuide[]>([]);
+
+  /** Whether Space is held (temporarily switches empty-drag from marquee to pan). */
+  private panKey = false;
+  /** Marquee start point in canvas px (null when not rubber-band selecting). */
+  private marqueeStart: Vec2 | null = null;
+  private marqueeAdditive = false;
+  /** The live marquee rectangle in CSS px for the overlay, or null. */
+  protected readonly marquee = signal<{ x: number; y: number; w: number; h: number } | null>(null);
 
   /** Reactive undo/redo availability (recomputes when `rev` bumps). */
   protected readonly canUndo = computed(() => (this.rev(), this.history?.canUndo ?? false));
@@ -401,6 +410,13 @@ export class WebGpuScene {
           return;
         }
       }
+      // Empty space (no handle, not on the selection): rubber-band select —
+      // unless Space is held, which reserves the drag for panning.
+      if (!this.panKey) {
+        this.marqueeStart = pt;
+        this.marqueeAdditive = event.shiftKey;
+        return;
+      }
     }
     this.gesture.down(event.pointerId, pt);
   }
@@ -440,6 +456,12 @@ export class WebGpuScene {
       this.draw();
       return;
     }
+    if (this.marqueeStart) {
+      this.pointerMoved = true;
+      const s = this.marqueeStart;
+      this.marquee.set({ x: Math.min(s.x, pt.x), y: Math.min(s.y, pt.y), w: Math.abs(pt.x - s.x), h: Math.abs(pt.y - s.y) });
+      return;
+    }
     const change = this.gesture.move(event.pointerId, pt);
     if (change) {
       this.pointerMoved = true;
@@ -472,6 +494,28 @@ export class WebGpuScene {
       this.snapGuides.set([]);
       return;
     }
+    // Finish a rubber-band selection: pick the nodes it covers (shift adds to
+    // the existing selection). A marquee with no movement is just a click.
+    if (this.marqueeStart) {
+      const canvas = this.canvasRef()?.nativeElement;
+      if (this.pointerMoved && canvas) {
+        const a = screenToWorld(this.camera(), this.marqueeStart);
+        const b = screenToWorld(this.camera(), this.toCanvas(event, canvas));
+        const boxWorld = { minX: Math.min(a.x, b.x), minY: Math.min(a.y, b.y), maxX: Math.max(a.x, b.x), maxY: Math.max(a.y, b.y) };
+        const hits = nodesInBox(this.document, boxWorld);
+        this.selection.set(this.marqueeAdditive ? this.addAll(this.selection(), hits) : createSelection(hits));
+        this.rev.update((v) => v + 1);
+      } else if (canvas) {
+        // No drag → treat as a click: clear (or shift-toggle nothing).
+        const world = screenToWorld(this.camera(), this.toCanvas(event, canvas));
+        const hit = hitTest(this.document, world, { tolerance: 6 / this.camera().zoom, select: 'outermost' });
+        this.selection.update((s) => resolveSelectionClick(s, hit, { additive: event.shiftKey }));
+      }
+      this.marqueeStart = null;
+      this.marquee.set(null);
+      this.pointerMoved = false;
+      return;
+    }
     this.gesture.up(event.pointerId);
     // A click (no drag) selects the top-most shape; empty space clears; shift
     // adds/removes. Drag is reserved for panning.
@@ -482,6 +526,14 @@ export class WebGpuScene {
       this.selection.update((s) => resolveSelectionClick(s, hit, { additive: event.shiftKey }));
     }
     this.pointerMoved = false;
+  }
+
+  /** Union `ids` into an existing selection (keeps the last as primary). */
+  private addAll(sel: Selection, ids: readonly NodeId[]): Selection {
+    if (ids.length === 0) return sel;
+    const set = new Set(sel.ids);
+    for (const id of ids) set.add(id);
+    return { ids: set, primary: ids[ids.length - 1] };
   }
 
   /** Begin a handle drag: freeze the frame + start point and snapshot transforms. */
@@ -562,6 +614,12 @@ export class WebGpuScene {
     if (!this.selectable()) return;
     const mod = event.ctrlKey || event.metaKey;
     const key = event.key;
+    if (key === ' ') {
+      // Hold Space to pan instead of rubber-band selecting.
+      this.panKey = true;
+      event.preventDefault();
+      return;
+    }
     if (mod && (key === 'z' || key === 'Z')) {
       event.preventDefault();
       if (event.shiftKey) this.redo();
@@ -591,6 +649,11 @@ export class WebGpuScene {
       event.preventDefault();
       this.nudgeSelection(dir, event.shiftKey);
     }
+  }
+
+  /** Release Space → back to marquee-on-empty-drag. */
+  protected onKeyUp(event: KeyboardEvent): void {
+    if (event.key === ' ') this.panKey = false;
   }
 
   /** Nudge the selection by `dir` × the (shift-scaled) step. One undo entry. */

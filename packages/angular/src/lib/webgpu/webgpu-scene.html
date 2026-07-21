@@ -1,4 +1,4 @@
-<div class="webgpu-scene" tabindex="0" (keydown)="onKey($event)">
+<div class="webgpu-scene" tabindex="0" (keydown)="onKey($event)" (keyup)="onKeyUp($event)">
   <div class="toolbar">
     <button type="button" (click)="fit()" [disabled]="renderState() !== 'ready'">Fit</button>
     @if (selectable()) {
@@ -10,7 +10,7 @@
       <button type="button" (click)="exportPngFile()" [disabled]="renderState() !== 'ready'">PNG</button>
     }
     <span class="hint">
-      @if (selectable()) { click = select · arrows = nudge · ⌫ = delete · ⌘D = duplicate · }drag = pan · wheel / pinch = zoom
+      @if (selectable()) { click / drag = select · space-drag = pan · arrows = nudge · ⌫ = delete · ⌘D = duplicate · }@if (!selectable()) { drag = pan · }wheel / pinch = zoom
     </span>
     @if (renderState() === 'ready') {
       <span class="fps">{{ fps() }} fps</span>
@@ -29,6 +29,9 @@
     ></canvas>
     @if (selectable()) {
       <svg class="handles" aria-hidden="true">
+        @if (marquee(); as m) {
+          <rect class="marquee" [attr.x]="m.x" [attr.y]="m.y" [attr.width]="m.w" [attr.height]="m.h" />
+        }
         @for (l of guideLines(); track $index) {
           <line class="snap-guide" [attr.x1]="l.x1" [attr.y1]="l.y1" [attr.x2]="l.x2" [attr.y2]="l.y2" />
         }
