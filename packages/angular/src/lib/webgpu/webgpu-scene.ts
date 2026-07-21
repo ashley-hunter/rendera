@@ -12,7 +12,10 @@ import {
   applyTransform,
   buildRenderList,
   createCamera,
+  createSelection,
+  deleteNodes,
   dragTransform,
+  duplicateNodes,
   EMPTY_SELECTION,
   exportSvg,
   fitBounds,
@@ -23,6 +26,7 @@ import {
   layoutTextNode,
   layoutTextNodeGlyphs,
   MsdfAtlas,
+  nudgeNodes,
   panBy,
   pruneSelection,
   RenderaFont,
@@ -469,18 +473,83 @@ export class WebGpuScene {
     this.draw();
   }
 
-  /** Keyboard: Cmd/Ctrl+Z = undo, +Shift or Ctrl+Y = redo (editing only). */
+  /** Arrow-key nudge distance in world units (Shift = a coarser step). */
+  private static readonly NUDGE = 1;
+  private static readonly NUDGE_SHIFT = 10;
+
+  /**
+   * Keyboard editing (selectable scenes only):
+   * - Cmd/Ctrl+Z = undo, +Shift or Ctrl+Y = redo
+   * - Cmd/Ctrl+D = duplicate the selection (offset copies, then select them)
+   * - Delete / Backspace = remove the selection
+   * - Arrow keys = nudge the selection (Shift = a coarser step)
+   *
+   * Each edit records as a single undo entry (the ops wrap themselves in one
+   * transaction), then refreshes the frame overlay and redraws.
+   */
   protected onKey(event: KeyboardEvent): void {
     if (!this.selectable()) return;
     const mod = event.ctrlKey || event.metaKey;
-    if (mod && (event.key === 'z' || event.key === 'Z')) {
+    const key = event.key;
+    if (mod && (key === 'z' || key === 'Z')) {
       event.preventDefault();
       if (event.shiftKey) this.redo();
       else this.undo();
-    } else if (mod && (event.key === 'y' || event.key === 'Y')) {
+      return;
+    }
+    if (mod && (key === 'y' || key === 'Y')) {
       event.preventDefault();
       this.redo();
+      return;
     }
+    if (mod && (key === 'd' || key === 'D')) {
+      event.preventDefault();
+      this.duplicateSelection();
+      return;
+    }
+    if (key === 'Delete' || key === 'Backspace') {
+      event.preventDefault();
+      this.deleteSelection();
+      return;
+    }
+    const nudge: Record<string, Vec2> = {
+      ArrowLeft: vec2(-1, 0), ArrowRight: vec2(1, 0), ArrowUp: vec2(0, -1), ArrowDown: vec2(0, 1),
+    };
+    const dir = nudge[key];
+    if (dir) {
+      event.preventDefault();
+      this.nudgeSelection(dir, event.shiftKey);
+    }
+  }
+
+  /** Nudge the selection by `dir` × the (shift-scaled) step. One undo entry. */
+  private nudgeSelection(dir: Vec2, coarse: boolean): void {
+    const ids = [...this.selection().ids];
+    if (!ids.length) return;
+    const step = coarse ? WebGpuScene.NUDGE_SHIFT : WebGpuScene.NUDGE;
+    nudgeNodes(this.document, ids, dir.x * step, dir.y * step);
+    this.rev.update((v) => v + 1);
+    this.draw();
+  }
+
+  /** Delete the selected nodes (and subtrees) and clear the selection. */
+  private deleteSelection(): void {
+    const ids = [...this.selection().ids];
+    if (!ids.length) return;
+    deleteNodes(this.document, ids);
+    this.selection.set(EMPTY_SELECTION);
+    this.rev.update((v) => v + 1);
+    this.draw();
+  }
+
+  /** Duplicate the selected subtrees and select the copies. One undo entry. */
+  private duplicateSelection(): void {
+    const ids = [...this.selection().ids];
+    if (!ids.length) return;
+    const copies = duplicateNodes(this.document, ids);
+    if (copies.length) this.selection.set(createSelection(copies));
+    this.rev.update((v) => v + 1);
+    this.draw();
   }
 
   /** Download the scene as an SVG file (vector, re-importable). */

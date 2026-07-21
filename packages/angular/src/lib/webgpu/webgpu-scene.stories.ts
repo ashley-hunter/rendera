@@ -37,10 +37,13 @@ export const CrispImage: Story = {
  * fills, and stroke width. The selection shows an **oriented frame with handles**:
  * drag the body to **move**, a corner/edge to **scale** (shift = keep aspect, alt
  * = from centre), or the top grip to **rotate**. The frame stays oriented with a
- * rotated shape, so scaling never skews it. **Undo / Redo** (buttons or
- * Cmd/Ctrl+Z, +Shift to redo) step through edits — a whole drag is a single undo.
- * The **SVG** / **PNG** toolbar buttons export the scene as a re-importable vector
- * file and a raster capture. Empty-space drag still pans, wheel zooms.
+ * rotated shape, so scaling never skews it. **Keyboard**: arrow keys nudge the
+ * selection (Shift = a coarser step), **Delete/Backspace** removes it, and
+ * **Cmd/Ctrl+D** duplicates it (the copies become the new selection). **Undo /
+ * Redo** (buttons or Cmd/Ctrl+Z, +Shift to redo) step through every edit — a
+ * whole drag, or a nudge/delete/duplicate, is a single undo. The **SVG** /
+ * **PNG** toolbar buttons export the scene as a re-importable vector file and a
+ * raster capture. Empty-space drag still pans, wheel zooms.
  */
 export const Editor: Story = {
   args: { scene: createVectorScene(), selectable: true, exportable: true },

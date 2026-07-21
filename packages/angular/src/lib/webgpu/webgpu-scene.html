@@ -10,7 +10,7 @@
       <button type="button" (click)="exportPngFile()" [disabled]="renderState() !== 'ready'">PNG</button>
     }
     <span class="hint">
-      @if (selectable()) { click = select · }drag = pan · wheel / pinch = zoom
+      @if (selectable()) { click = select · arrows = nudge · ⌫ = delete · ⌘D = duplicate · }drag = pan · wheel / pinch = zoom
     </span>
     @if (renderState() === 'ready') {
       <span class="fps">{{ fps() }} fps</span>
