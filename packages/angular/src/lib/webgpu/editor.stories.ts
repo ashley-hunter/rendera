@@ -143,6 +143,17 @@ export const TextEditing: Story = {
 };
 
 /**
+ * **Path point editing.** Select a single path and its **anchor points** (white
+ * squares) and **control points** (blue dots, joined to their anchors by handle
+ * lines) appear in place of the transform frame. Drag any point to reshape the
+ * curve — each drag is one undo. Dragging the path body still moves the whole
+ * shape; click empty space to deselect.
+ */
+export const PathEditing: Story = {
+  args: { scene: createVectorScene(), selectable: true, pathEditing: true },
+};
+
+/**
  * **Export.** The **SVG** button downloads the scene as a re-importable vector
  * file; **PNG** captures the current frame as a raster image.
  */

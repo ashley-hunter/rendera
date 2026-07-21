@@ -129,6 +129,18 @@
             <circle class="pen-dot" [attr.cx]="d.x" [attr.cy]="d.y" r="3.5" />
           }
         }
+        @if (pathOverlay(); as pe) {
+          @for (l of pe.lines; track $index) {
+            <line class="path-handle" [attr.x1]="l.a.x" [attr.y1]="l.a.y" [attr.x2]="l.b.x" [attr.y2]="l.b.y" />
+          }
+          @for (p of pe.points; track $index) {
+            @if (p.anchor) {
+              <rect class="path-anchor" [attr.x]="p.x - 4" [attr.y]="p.y - 4" width="8" height="8" />
+            } @else {
+              <circle class="path-control" [attr.cx]="p.x" [attr.cy]="p.y" r="4" />
+            }
+          }
+        }
         @for (l of guideLines(); track $index) {
           <line class="snap-guide" [attr.x1]="l.x1" [attr.y1]="l.y1" [attr.x2]="l.x2" [attr.y2]="l.y2" />
         }

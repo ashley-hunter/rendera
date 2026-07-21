@@ -33,6 +33,7 @@ import {
   handles,
   History,
   hitTest,
+  invert,
   layoutTextNode,
   layoutTextNodeGlyphs,
   linearToHex,
@@ -43,6 +44,8 @@ import {
   nodesInBox,
   nudgeNodes,
   panBy,
+  pathHandleLines,
+  pathPoints,
   pruneSelection,
   RenderaFont,
   resolveSelectionClick,
@@ -50,6 +53,7 @@ import {
   screenToWorld,
   selectionBounds,
   selectionFrame,
+  setPathPoint,
   snapMove,
   transformPoint,
   ungroupNodes,
@@ -69,6 +73,8 @@ import {
   type MsdfNodeLayout,
   type NodeId,
   type Path,
+  type PathNode,
+  type PathPointRef,
   type SceneDocument,
   type Selection,
   type SnapGuide,
@@ -155,6 +161,8 @@ export class WebGpuScene {
   readonly keyboardEditing = input(false);
   /** Double-click a text node to edit its string inline. */
   readonly textEditing = input(false);
+  /** Edit a selected path's anchor/control points by dragging them. */
+  readonly pathEditing = input(false);
   /** Show SVG / PNG export buttons in the toolbar (default off). */
   readonly exportable = input(false);
   /** Show the layers panel beside the canvas (default off; implies selectable). */
@@ -227,6 +235,12 @@ export class WebGpuScene {
   } | null>(null);
   /** The node's visibility before editing (restored on commit/cancel). */
   private textEditPrevVisible = true;
+
+  /** Path-point drag: the node, the grabbed point, and the pre-drag path. */
+  private pathDragRef: PathPointRef | null = null;
+  private pathDragNodeId: NodeId | null = null;
+  private pathDragOrig: Path | null = null;
+  private pathDragMoved = false;
   /** Marquee start point in canvas px (null when not rubber-band selecting). */
   private marqueeStart: Vec2 | null = null;
   private marqueeAdditive = false;
@@ -253,10 +267,36 @@ export class WebGpuScene {
     return false;
   });
 
+  /** The single selected path being point-edited (pathEditing on), or null. */
+  protected readonly pathEditTarget = computed<NodeId | null>(() => {
+    this.rev();
+    if (!this.pathEditing() || !this.selectable()) return null;
+    const ids = [...this.selection().ids];
+    if (ids.length !== 1) return null;
+    return this.document.get(ids[0])?.type === 'path' ? ids[0] : null;
+  });
+
+  /** Path anchor/control points + handle lines projected to CSS px, or null. */
+  protected readonly pathOverlay = computed(() => {
+    const id = this.pathEditTarget();
+    if (!id) return null;
+    this.rev();
+    const node = this.document.get(id) as PathNode;
+    const world = this.document.getWorldMatrix(id);
+    const cam = this.camera();
+    const s = (p: Vec2) => worldToScreen(cam, transformPoint(world, p));
+    return {
+      points: pathPoints(node.path).map((pp) => ({ ...s(pp.point), anchor: pp.anchor })),
+      lines: pathHandleLines(node.path).map((l) => ({ a: s(l.from), b: s(l.to) })),
+    };
+  });
+
   /** The selection's oriented frame (unit box → world), or null. */
   private readonly frameBox = computed<Mat2D | null>(() => {
     this.rev();
     const sel = this.selection();
+    // Hidden while point-editing a path (the point handles replace the frame).
+    if (this.pathEditTarget()) return null;
     return sel.ids.size && this.selectable() ? selectionFrame(this.document, sel.ids) : null;
   });
 
@@ -557,6 +597,14 @@ export class WebGpuScene {
     // Editing: grab a handle, or the body of an already-selected shape, to
     // transform instead of pan. Everything else falls through to pan/select.
     if (this.selectable()) {
+      // Path editing takes priority: grab an anchor/control point if near one.
+      if (this.pathEditTarget()) {
+        const ref = this.pathPointAt(pt);
+        if (ref) {
+          this.startPathDrag(ref);
+          return;
+        }
+      }
       const ov = this.overlay();
       const grip = ov ? handleAt([...ov.grips, ov.rotate].map((h) => ({ id: h.id, point: vec2(h.x, h.y) })), pt, 11) : null;
       if (grip) {
@@ -589,6 +637,24 @@ export class WebGpuScene {
     const pt = this.toCanvas(event, canvas);
     if (this.tool() !== 'select') {
       this.onDrawPointerMove(pt);
+      return;
+    }
+    if (this.pathDragRef && this.pathDragNodeId && this.pathDragOrig) {
+      this.pathDragMoved = true;
+      const world = this.document.getWorldMatrix(this.pathDragNodeId);
+      const inv = invert(world);
+      if (inv) {
+        const local = transformPoint(inv, screenToWorld(this.camera(), pt));
+        const path = setPathPoint(this.pathDragOrig, this.pathDragRef, local);
+        const id = this.pathDragNodeId;
+        const apply = (): void => {
+          this.document.update(id, { path });
+        };
+        if (this.history) this.history.withoutHistory(apply);
+        else apply();
+        this.rev.update((v) => v + 1);
+        this.draw();
+      }
       return;
     }
     if (this.dragHandle && this.dragBox && this.dragStart) {
@@ -642,6 +708,10 @@ export class WebGpuScene {
     if (this.tool() !== 'select') {
       const canvas = this.canvasRef()?.nativeElement;
       if (canvas) this.onDrawPointerUp(this.toCanvas(event, canvas));
+      return;
+    }
+    if (this.pathDragRef) {
+      this.commitPathDrag();
       return;
     }
     if (this.dragHandle) {
@@ -707,6 +777,59 @@ export class WebGpuScene {
     const set = new Set(sel.ids);
     for (const id of ids) set.add(id);
     return { ids: set, primary: ids[ids.length - 1] };
+  }
+
+  // --- path point editing --------------------------------------------------
+
+  /** The nearest anchor/control point to `pt` (canvas px) within grab radius. */
+  private pathPointAt(pt: Vec2): PathPointRef | null {
+    const id = this.pathEditTarget();
+    if (!id) return null;
+    const node = this.document.get(id) as PathNode;
+    const world = this.document.getWorldMatrix(id);
+    const cam = this.camera();
+    let best: PathPointRef | null = null;
+    let bestD = 9 * 9;
+    for (const pp of pathPoints(node.path)) {
+      const s = worldToScreen(cam, transformPoint(world, pp.point));
+      const d = (s.x - pt.x) ** 2 + (s.y - pt.y) ** 2;
+      if (d <= bestD) {
+        bestD = d;
+        best = pp.ref;
+      }
+    }
+    return best;
+  }
+
+  private startPathDrag(ref: PathPointRef): void {
+    const id = this.pathEditTarget();
+    if (!id) return;
+    this.pathDragNodeId = id;
+    this.pathDragRef = ref;
+    this.pathDragOrig = (this.document.get(id) as PathNode).path;
+    this.pathDragMoved = false;
+    this.beginInteraction();
+  }
+
+  /** Commit a path-point drag as one undo entry (live preview → recorded final). */
+  private commitPathDrag(): void {
+    const id = this.pathDragNodeId;
+    if (id && this.pathDragMoved && this.pathDragOrig) {
+      const finalPath = (this.document.get(id) as PathNode).path;
+      const orig = this.pathDragOrig;
+      this.history?.withoutHistory(() => this.document.update(id, { path: orig }));
+      const run = (): void => {
+        this.document.update(id, { path: finalPath });
+      };
+      if (this.history) this.history.batch(run);
+      else run();
+    }
+    this.pathDragRef = null;
+    this.pathDragNodeId = null;
+    this.pathDragOrig = null;
+    this.pathDragMoved = false;
+    this.rev.update((v) => v + 1);
+    this.draw();
   }
 
   // --- drawing tools -------------------------------------------------------
