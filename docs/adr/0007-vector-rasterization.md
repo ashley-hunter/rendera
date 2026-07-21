@@ -165,9 +165,9 @@ fragments only test their cluster's edges. A single connected shape stays one
 draw (a no-op). This is cheap, general (helps any multi-part path — icons, dashed
 runs, scattered marks), and correct because disjoint-bbox clusters have disjoint
 fills, so compositing them separately equals filling them together. For a single
-large connected shape (a magnified glyph, a big fill), the **uniform-tile overlay**
-below skips the interior; a full per-tile winding backdrop (2D edge bins) remains
-deferred.
+large connected shape (a magnified glyph, a big fill), the **per-tile winding
+backdrop** below tiles the edges within that one cluster so its interior/exterior
+skip the edge walk.
 
 Complementary edge-count fix: stroking flattens curves to polylines and emitted
 a full round-join **disc** at every vertex — including the ~1000 near-collinear
@@ -245,36 +245,47 @@ so `A−2B+C ≈ 0`). `dQuad`'s Cardano solve divides by that and returns garbag
 which showed as a stroked rect's horizontal edges rendering in broken chunks.
 `dQuad` now falls back to `dLine` when the quad is effectively straight.
 
-## Follow-up: uniform-tile overlay (skip the magnified interior)
+## Follow-up: per-tile winding backdrop (`tiling.ts`)
 
-The band loop still walks edges for *every* covered fragment. When a shape is
-magnified, its vast interior and the empty area around it are pure overhead — a
-pixel deep inside a zoomed glyph tests the strip's edges only to conclude what a
-neighbour already knew. A **16px tile grid** over each draw's bbox removes that:
-each tile is classified once, on the CPU, as
+The band loop walks edges for *every* covered fragment. When a shape is magnified,
+its vast interior and the empty area around it are pure overhead — a pixel deep
+inside a zoomed glyph tests the strip's edges only to conclude what a neighbour
+already knew. The band table is replaced by a **16px tile grid** where each tile
+carries its own edge list plus a **winding backdrop**, so a fragment reads the
+carried-in winding and walks only its tile's edges:
 
-- **boundary** — an edge's (reach-padded) bbox overlaps it, so a fragment there
-  runs the exact band loop as before; or
-- **uniform** — no edge lies within reach, so the winding is *constant* across the
-  tile and the distance to any edge exceeds the AA/stroke reach. Its one winding
-  number is found at the tile centre by a per-tile-row scanline sweep
-  (`O(rows·edges)`), and a fragment reads it and skips the loop entirely — solid
-  if inside, empty if outside; a distance-field stroke's uniform tiles are always
-  empty (no centerline near).
+    winding(pixel) = backdrop(tile) + windRay(pixel ; tile edges)
 
-This is exact (a uniform tile genuinely has no edge crossing it, so its winding
-*is* constant and there is no AA rim to draw) and it reuses the proven band loop
-untouched for the thin boundary band of tiles along each contour — so only the
-correctness-critical pixels run the per-pixel winding, and the interior/exterior
-(the bulk of a magnified shape) is one tile lookup.
+An empty tile (interior or exterior of the shape) has no edges — the fragment
+just reads the backdrop and is done, solid or empty; that is the bulk of a
+magnified shape.
 
-A *simpler-looking* scheme was tried first and rejected: give every tile a
-winding **backdrop** (`winding(corner;all) − winding(corner;tileEdges)`) and let
-each fragment add it to a per-tile edge walk. It is wrong — an edge that
-partially spans a tile's height crosses a pixel's scanline but not the tile
-corner's, and isn't in the tile's list, so it is counted nowhere (the even-odd
-donut test reproduces the misfill). A correct constant backdrop needs edges
-*clipped to tile rows* (Pathfinder-style, full-crossing edges contributing a
-prefix-summed ±1) — a larger effort left for later. The uniform-tile overlay gets
-the interior-skip win now without that machinery, because uniform tiles have no
-partial-span edges by definition.
+The backdrop is defined exactly as
+
+    backdrop = trueWinding(tileCorner) − windRay(tileCorner ; tile edges)
+
+(`trueWinding` = winding over all edges, at the tile's top-left corner, from a
+per-row scanline sweep). This identity holds for *any* tile edge set as long as
+every edge NOT in it has the same rightward-ray crossing count at the corner and
+at any pixel in the tile — i.e. every edge whose y-range **starts or ends inside
+the tile's strip** (a "partial" edge) must be in the set. Edges that span the
+whole strip or miss it contribute equally at corner and pixel, so the backdrop
+absorbs them. So each tile's set is the edges within `reach` (needed for the
+distance field anyway) plus the strip's partials. Adding extra edges is always
+safe — the backdrop subtracts them back out.
+
+A *simpler-looking* scheme was tried first and rejected: `backdrop =
+winding(corner;all) − winding(corner;tileEdges)` with tile sets of only the
+nearby edges. It misfills when an edge partially spans a tile's height and lies
+outside the tile — it is counted neither in the list nor the backdrop (the
+even-odd donut reproduces it). Requiring the strip's partials in the set is
+exactly the fix. The whole thing is proven by a CPU winding-correctness test
+(`tiling.spec.ts`) comparing `backdrop + per-tile winding` against a brute-force
+sum over all edges, at a dense point grid, before it reaches the GPU.
+
+The interior/exterior skip helps every shape. Thinning the *boundary* tiles most
+helps long, straight edges (large low-poly fills): flattened curves emit many
+short quad segments, so nearly every segment is "partial" in its strip and a
+boundary tile's list stays close to band-sized. Cutting the flattened edge count
+(adaptive tolerance) would broaden the win to curved content and is the natural
+next step.

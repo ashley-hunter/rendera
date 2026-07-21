@@ -21,6 +21,7 @@ import {
   type ScreenEffect,
 } from '@rendera/core';
 import { blueNoiseTile, BLUE_NOISE_SIZE } from './blue-noise';
+import { buildTiles } from './tiling';
 
 /** A decoded image source the renderer can upload (browser image types). */
 export type ImageSource = ImageBitmap | HTMLCanvasElement | OffscreenCanvas;
@@ -61,90 +62,16 @@ interface MsdfResources {
   sampler: GPUSampler;
 }
 
-/** Per-path-draw packing: its params slot, row-band table location, and the
- *  uniform-tile overlay (tiles with no nearby edge skip the band loop). */
+/** Per-path-draw packing: its params slot and 2D tile-grid location (see
+ *  `buildTiles` in tiling.ts). */
 interface PathDraw {
   slot: number;
-  bandTableOffset: number;
-  bandCount: number;
-  bandMinY: number;
-  bandH: number;
-  tileStateOffset: number;
+  tileTableOffset: number;
   tilesX: number;
   tilesY: number;
   tileOriginX: number;
   tileOriginY: number;
   tileSize: number;
-}
-
-/** Sentinel tile state meaning "boundary" — an edge is near this tile, so a
- *  fragment must run the band loop. Any other value is a uniform tile's constant
- *  winding number (no edge within reach), letting the fragment skip the loop. */
-const TILE_BOUNDARY = 2147483647;
-
-// --- CPU winding (mirrors the WGSL windLine/windQuad EXACTLY) ------------------
-// A uniform tile has no edge within reach, so its winding is constant; we compute
-// it once at the tile centre with these. The half-open scanline rule (lower-y
-// endpoint inclusive, upper exclusive) matches the shader so a tile classified
-// uniform-inside agrees with what the boundary loop would have found next to it.
-function quadCrossXCPU(
-  ax: number, bx: number, cx: number,
-  a2: number, b1: number, c0: number, tlo: number, thi: number
-): number {
-  let t = 0;
-  if (Math.abs(a2) < 1e-6) {
-    t = -c0 / b1;
-  } else {
-    const s = Math.sqrt(Math.max(b1 * b1 - 4 * a2 * c0, 0));
-    const r0 = (-b1 - s) / (2 * a2);
-    const r1 = (-b1 + s) / (2 * a2);
-    t = r0;
-    if (r0 < tlo - 1e-4 || r0 > thi + 1e-4) t = r1;
-  }
-  t = Math.min(thi, Math.max(tlo, t));
-  const u = 1 - t;
-  return u * u * ax + 2 * u * t * bx + t * t * cx;
-}
-
-/** Signed crossings of the horizontal line y over one edge (crossing-x + winding
- *  sign), split into monotonic pieces exactly like windQuad. A scanline sweep of
- *  these gives the winding at any x on the row as `sum of signs with cross.x > x`. */
-function collectCrossings(
-  e: { a: { x: number; y: number }; b: { x: number; y: number }; c: { x: number; y: number }; quad: boolean },
-  y: number,
-  out: { x: number; s: number }[]
-): void {
-  if (!e.quad) {
-    const ay = e.a.y;
-    const cy = e.c.y;
-    const up = ay <= y && cy > y;
-    const down = cy <= y && ay > y;
-    if (!up && !down) return;
-    const t = (y - ay) / (cy - ay);
-    out.push({ x: e.a.x + t * (e.c.x - e.a.x), s: up ? 1 : -1 });
-    return;
-  }
-  const ax = e.a.x, ay = e.a.y, bx = e.b.x, by = e.b.y, cx = e.c.x, cy = e.c.y;
-  const a2 = ay - 2 * by + cy;
-  const b1 = 2 * (by - ay);
-  const c0 = ay - y;
-  const sub = (tlo: number, thi: number, ya: number, yb: number): void => {
-    const up = ya <= y && yb > y;
-    const down = yb <= y && ya > y;
-    if (!up && !down) return;
-    out.push({ x: quadCrossXCPU(ax, bx, cx, a2, b1, c0, tlo, thi), s: up ? 1 : -1 });
-  };
-  if (Math.abs(a2) > 1e-6) {
-    const tex = -b1 / (2 * a2);
-    if (tex > 0 && tex < 1) {
-      const uex = 1 - tex;
-      const yex = uex * uex * ay + 2 * uex * tex * by + tex * tex * cy;
-      sub(0, tex, ay, yex);
-      sub(tex, 1, yex, cy);
-      return;
-    }
-  }
-  sub(0, 1, ay, cy);
 }
 
 /** A layer target on the compositing stack, with the group's compositing props. */
@@ -612,25 +539,22 @@ struct PathParams {
   stroke : vec4f, // x = distance-field stroke half-width (device px), 0 = fill; y = cap-plane count (0..2)
   capA : vec4f,   // butt-cap terminus A: xy = point, zw = outward unit tangent
   capB : vec4f,   // butt-cap terminus B
-  tile0 : vec4f,  // uniform-tile overlay: x = tilesX, y = tilesY, z = originX, w = originY
-  tile1 : vec4f,  // x = tileSize, y = tileStateOffset
+  tile0 : vec4f,  // tile grid: x = tilesX, y = tilesY, z = originX, w = originY
+  tile1 : vec4f,  // x = tileSize, y = tileTableOffset
 };
 @group(1) @binding(1) var<uniform> pp : PathParams;
-// Row-band acceleration: bandTable[bandTableOffset + row] = (indexOffset, count)
-// into edgeIndex, which lists the edges whose y-range touches that horizontal
-// band. A pixel only tests its own band's edges.
-@group(1) @binding(2) var<storage, read> bandTable : array<vec2u>;
+// 2D tile acceleration: tileTable[tileTableOffset + ty*tilesX + tx] =
+// (indexOffset, count, backdrop, _). indexOffset/count index edgeIndex (this
+// tile's edges); backdrop is the winding carried in from every edge outside the
+// list. A fragment reads the backdrop and walks only its tile's edges — empty
+// tiles (interior/exterior) do no edge work at all.
+@group(1) @binding(2) var<storage, read> tileTable : array<vec4i>;
 @group(1) @binding(3) var<storage, read> edgeIndex : array<u32>;
 // Gradient colour stops, in linear-light. stop.color = rgba; stop.info.x = the
 // stop's offset in [0,1]. Each path draw owns the contiguous run
 // [grad.x, grad.x + grad.y).
 struct GradStop { color : vec4f, info : vec4f };
 @group(1) @binding(4) var<storage, read> stops : array<GradStop>;
-// Uniform-tile overlay: tileState[tileStateOffset + ty*tilesX + tx] is either
-// TILE_BOUNDARY (an edge is near — run the band loop) or the tile's constant
-// winding number (no edge within reach — skip the loop entirely).
-@group(1) @binding(5) var<storage, read> tileState : array<i32>;
-const TILE_BOUNDARY : i32 = 2147483647;
 
 @vertex fn vs(@location(0) corner : vec2f) -> @builtin(position) vec4f {
   let pad = 2.0; // device px, so the AA rim is never clipped by the bbox quad
@@ -882,36 +806,25 @@ fn paintColor(p : vec2f) -> vec4f {
   let p = frag.xy / vp.scale; // target px -> device px (edge space)
   let strokeHalf = pp.stroke.x; // > 0 → distance-field stroke over the centerline
   let reach = select(2.0, strokeHalf + 2.0, strokeHalf > 0.0);
-  var winding = 0;
   var dist = 1e9;
-  // Uniform-tile fast path: if no edge is near this pixel's tile, its winding is
-  // a constant (already computed) and no edge lies within the AA/stroke reach —
-  // so skip the band loop entirely. Most of a magnified shape is such tiles.
+  // Pick this pixel's tile: winding starts at the tile's backdrop (the carried-in
+  // winding from every edge outside the tile) and only this tile's own edges are
+  // walked. Empty tiles (interior/exterior of a magnified shape) do no edge work.
   let tilesX = i32(pp.tile0.x);
   let tilesY = i32(pp.tile0.y);
   let tsz = pp.tile1.x;
   let tx = clamp(i32(floor((p.x - pp.tile0.z) / tsz)), 0, tilesX - 1);
   let ty = clamp(i32(floor((p.y - pp.tile0.w) / tsz)), 0, tilesY - 1);
-  let ts = tileState[i32(pp.tile1.y) + ty * tilesX + tx];
-  if (ts != TILE_BOUNDARY) {
-    winding = ts; // constant winding, dist stays 1e9 (nothing within reach)
-  } else {
-  // Boundary tile: pick this pixel's horizontal band and iterate only its edges.
-  let bandCount = i32(pp.counts.z);
-  var row = i32(floor((p.y - pp.misc.y) / pp.misc.z));
-  row = clamp(row, 0, bandCount - 1);
-  let entry = bandTable[pp.counts.y + u32(row)];
-  let idxOffset = entry.x;
-  let cnt = entry.y;
+  let tile = tileTable[i32(pp.tile1.y) + ty * tilesX + tx];
+  let idxOffset = u32(tile.x);
+  let cnt = u32(tile.y);
+  var winding = tile.z; // backdrop
   for (var j = 0u; j < cnt; j = j + 1u) {
     let e = edges[edgeIndex[idxOffset + j]];
     // The exact distance SDF only matters within reach of the pixel: for a
     // fill that's the ~1px AA rim, for a stroke it's the whole half-width band.
     let lo = min(min(e.a, e.b), e.c) - vec2f(reach);
     let hi = max(max(e.a, e.b), e.c) + vec2f(reach);
-    // Band edges are sorted by max-X descending: once one is entirely left of
-    // this pixel's reach, so is every edge after it — stop.
-    if (hi.x < p.x) { break; }
     let near = p.x >= lo.x && p.x <= hi.x && p.y >= lo.y && p.y <= hi.y;
     if (e.kind.x > 0.5) {
       if (near) { dist = min(dist, dQuad(p, e.a, e.b, e.c)); }
@@ -921,7 +834,6 @@ fn paintColor(p : vec2f) -> vec4f {
       if (strokeHalf == 0.0) { winding = winding + windLine(p, e.a, e.c); }
     }
   }
-  } // end boundary-tile branch
   var coverage : f32;
   if (strokeHalf > 0.0) {
     // Distance-field stroke: covered where distance to the centerline ≤ half,
@@ -1048,9 +960,8 @@ export class WebGpuRenderer {
 
   /** Vector-fill state: edge storage, row-band tables, per-draw params. */
   private edgeBuffer: GPUBuffer | null = null;
-  private bandTableBuffer: GPUBuffer | null = null;
+  private tileTableBuffer: GPUBuffer | null = null;
   private edgeIndexBuffer: GPUBuffer | null = null;
-  private tileStateBuffer: GPUBuffer | null = null;
   private pathParamsBuffer: GPUBuffer;
   private pathParamsSlots = 0;
   private pathDraws: PathDraw[] = [];
@@ -1423,7 +1334,6 @@ export class WebGpuRenderer {
         { binding: 2, visibility: GPUShaderStage.FRAGMENT, buffer: { type: 'read-only-storage' } },
         { binding: 3, visibility: GPUShaderStage.FRAGMENT, buffer: { type: 'read-only-storage' } },
         { binding: 4, visibility: GPUShaderStage.FRAGMENT, buffer: { type: 'read-only-storage' } },
-        { binding: 5, visibility: GPUShaderStage.FRAGMENT, buffer: { type: 'read-only-storage' } },
       ],
     });
     const pathPipeline = device.createRenderPipeline({
@@ -1669,13 +1579,11 @@ export class WebGpuRenderer {
     const images: number[] = [];
     const edges: number[] = [];
     const msdf: number[] = []; // 16 floats/instance: transform + uv + colour + pxRange
-    const bandTable: number[] = []; // (indexOffset, count) pairs
-    const edgeIndex: number[] = []; // global edge indices, grouped by band
-    const tileState: number[] = []; // per-tile: TILE_BOUNDARY or constant winding
+    const tileTable: number[] = []; // (indexOffset, count, backdrop, _) per tile
+    const edgeIndex: number[] = []; // global edge indices, grouped by tile
     this.pathDraws = [];
     this.msdfDraws = [];
-    const bandHeight = 8; // device px per horizontal band
-    const tileSize = 16; // device px per uniform-tile overlay cell
+    const tileSize = 16; // device px per tile
     const pad = 2; // AA margin, matching the vertex bbox pad
     let blendOps = 0;
     let maskOps = 0;
@@ -1694,104 +1602,29 @@ export class WebGpuRenderer {
         if (cmd.blend !== 'normal') blendOps++;
       } else if (cmd.op === 'draw-path') {
         const edgeBase = edges.length / 8;
-        const edgeMaxX = new Float32Array(cmd.edges.length);
-        cmd.edges.forEach((e, i) => {
-          edges.push(e.a.x, e.a.y, e.b.x, e.b.y, e.c.x, e.c.y, e.quad ? 1 : 0, 0);
-          edgeMaxX[i] = Math.max(e.a.x, e.b.x, e.c.x);
-        });
-        // Bin edges into horizontal bands over the (padded) screen bbox. A
-        // distance-field stroke reaches `strokeHalf` beyond each edge, so its
-        // edges must land in every band within that reach (bounds already
-        // include it).
-        const ePad = cmd.strokeHalf ? cmd.strokeHalf + pad : pad;
-        const minY = cmd.bounds.minY - pad;
-        const maxY = cmd.bounds.maxY + pad;
-        const bandCount = Math.max(1, Math.ceil((maxY - minY) / bandHeight));
-        const buckets: number[][] = Array.from({ length: bandCount }, () => []);
-        cmd.edges.forEach((e, i) => {
-          const ey0 = Math.min(e.a.y, e.b.y, e.c.y) - ePad;
-          const ey1 = Math.max(e.a.y, e.b.y, e.c.y) + ePad;
-          const b0 = Math.min(bandCount - 1, Math.max(0, Math.floor((ey0 - minY) / bandHeight)));
-          const b1 = Math.min(bandCount - 1, Math.max(0, Math.floor((ey1 - minY) / bandHeight)));
-          for (let b = b0; b <= b1; b++) {
-            buckets[b].push(edgeBase + i);
-          }
-        });
-        // Sort each band's edges by max-X descending so the fragment shader can
-        // stop as soon as it reaches edges entirely left of the pixel (they can
-        // neither cross its rightward winding ray nor touch its AA rim). Output
-        // is unchanged — only the wasted per-pixel edge tests are culled.
-        const bandTableOffset = bandTable.length / 2;
-        for (let b = 0; b < bandCount; b++) {
-          buckets[b].sort((ga, gb) => edgeMaxX[gb - edgeBase] - edgeMaxX[ga - edgeBase]);
-          bandTable.push(edgeIndex.length, buckets[b].length);
-          for (const gi of buckets[b]) {
-            edgeIndex.push(gi);
-          }
-        }
-        // Uniform-tile overlay: classify each tile as boundary (an edge's padded
-        // bbox overlaps it → run the band loop above) or uniform (no edge within
-        // reach → constant winding, found once at the tile centre by a per-row
-        // scanline sweep). A distance-field stroke has no interior fill, so its
-        // uniform tiles are simply empty (winding 0). This lets a magnified
-        // shape's vast interior/exterior skip the per-pixel edge walk.
-        const tileOriginX = cmd.bounds.minX - pad;
-        const tileOriginY = cmd.bounds.minY - pad;
-        const tilesX = Math.max(1, Math.ceil((cmd.bounds.maxX + pad - tileOriginX) / tileSize));
-        const tilesY = Math.max(1, Math.ceil((cmd.bounds.maxY + pad - tileOriginY) / tileSize));
-        const hasEdge = new Uint8Array(tilesX * tilesY);
-        const tCol = (x: number): number => Math.min(tilesX - 1, Math.max(0, Math.floor((x - tileOriginX) / tileSize)));
-        const tRow = (y: number): number => Math.min(tilesY - 1, Math.max(0, Math.floor((y - tileOriginY) / tileSize)));
         for (const e of cmd.edges) {
-          const cA = tCol(Math.min(e.a.x, e.b.x, e.c.x) - ePad);
-          const cB = tCol(Math.max(e.a.x, e.b.x, e.c.x) + ePad);
-          const rA = tRow(Math.min(e.a.y, e.b.y, e.c.y) - ePad);
-          const rB = tRow(Math.max(e.a.y, e.b.y, e.c.y) + ePad);
-          for (let r = rA; r <= rB; r++) {
-            for (let c = cA; c <= cB; c++) hasEdge[r * tilesX + c] = 1;
-          }
+          edges.push(e.a.x, e.a.y, e.b.x, e.b.y, e.c.x, e.c.y, e.quad ? 1 : 0, 0);
         }
-        const tileStateOffset = tileState.length;
-        const isFill = !cmd.strokeHalf;
-        const cross: { x: number; s: number }[] = [];
-        for (let r = 0; r < tilesY; r++) {
-          const cy = tileOriginY + (r + 0.5) * tileSize;
-          let n = 0;
-          if (isFill) {
-            cross.length = 0;
-            for (const e of cmd.edges) collectCrossings(e, cy, cross);
-            cross.sort((u, v) => u.x - v.x);
-            n = cross.length;
-          }
-          const suffix = new Int32Array(n + 1);
-          for (let k = n - 1; k >= 0; k--) suffix[k] = suffix[k + 1] + cross[k].s;
-          let ptr = 0;
-          for (let c = 0; c < tilesX; c++) {
-            if (hasEdge[r * tilesX + c]) {
-              tileState.push(TILE_BOUNDARY);
-              continue;
-            }
-            if (!isFill) {
-              tileState.push(0);
-              continue;
-            }
-            const cx = tileOriginX + (c + 0.5) * tileSize;
-            while (ptr < n && cross[ptr].x <= cx) ptr++; // crossings strictly right of the centre
-            tileState.push(suffix[ptr]);
-          }
+        // Bin edges into a 2D tile grid with a per-tile winding backdrop (see
+        // tiling.ts): a fragment reads its tile's carried-in winding and walks
+        // only its tile's edges; empty interior/exterior tiles cost nothing. A
+        // distance-field stroke ignores winding, so it skips the backdrop.
+        // `reach` is how far the distance field looks past an edge.
+        const reach = cmd.strokeHalf ? cmd.strokeHalf + pad : pad;
+        const grid = buildTiles(cmd.edges, cmd.bounds, reach, tileSize, pad, !cmd.strokeHalf);
+        const tileTableOffset = tileTable.length / 4;
+        for (const t of grid.tiles) {
+          tileTable.push(edgeIndex.length, t.count, t.backdrop, 0);
+          for (let j = 0; j < t.count; j++) edgeIndex.push(edgeBase + grid.edgeIndex[t.offset + j]);
         }
         this.pathDraws.push({
           slot: this.pathDraws.length,
-          bandTableOffset,
-          bandCount,
-          bandMinY: minY,
-          bandH: bandHeight,
-          tileStateOffset,
-          tilesX,
-          tilesY,
-          tileOriginX,
-          tileOriginY,
-          tileSize,
+          tileTableOffset,
+          tilesX: grid.tilesX,
+          tilesY: grid.tilesY,
+          tileOriginX: grid.originX,
+          tileOriginY: grid.originY,
+          tileSize: grid.tileSize,
         });
         if (cmd.blend !== 'normal') blendOps++;
       } else if (cmd.op === 'draw-msdf') {
@@ -1846,15 +1679,12 @@ export class WebGpuRenderer {
       const edgeData = new Float32Array(edges);
       this.edgeBuffer = this.ensureStorageBuffer(this.edgeBuffer, edgeData.byteLength, 'path-edges');
       this.device.queue.writeBuffer(this.edgeBuffer, 0, edgeData);
-      const tableData = new Uint32Array(bandTable);
-      this.bandTableBuffer = this.ensureStorageBuffer(this.bandTableBuffer, tableData.byteLength, 'path-bands');
-      this.device.queue.writeBuffer(this.bandTableBuffer, 0, tableData);
-      const indexData = new Uint32Array(edgeIndex);
+      const tableData = new Int32Array(tileTable.length > 0 ? tileTable : [0, 0, 0, 0]);
+      this.tileTableBuffer = this.ensureStorageBuffer(this.tileTableBuffer, tableData.byteLength, 'path-tiles');
+      this.device.queue.writeBuffer(this.tileTableBuffer, 0, tableData);
+      const indexData = new Uint32Array(edgeIndex.length > 0 ? edgeIndex : [0]);
       this.edgeIndexBuffer = this.ensureStorageBuffer(this.edgeIndexBuffer, indexData.byteLength, 'path-edge-index');
       this.device.queue.writeBuffer(this.edgeIndexBuffer, 0, indexData);
-      const stateData = new Int32Array(tileState.length > 0 ? tileState : [0]);
-      this.tileStateBuffer = this.ensureStorageBuffer(this.tileStateBuffer, stateData.byteLength, 'path-tiles');
-      this.device.queue.writeBuffer(this.tileStateBuffer, 0, stateData);
       this.packPathParams(commands);
     }
     this.ensureBlendParams(blendOps);
@@ -1886,15 +1716,11 @@ export class WebGpuRenderer {
       f32[o + 5] = cmd.bounds.minY;
       f32[o + 6] = cmd.bounds.maxX;
       f32[o + 7] = cmd.bounds.maxY;
-      // counts = (fillRule, bandTableOffset, bandCount, paintKind)
+      // counts = (fillRule, _, _, paintKind)
       u32[o + 8] = cmd.fillRule === 'evenodd' ? 1 : 0;
-      u32[o + 9] = rec.bandTableOffset;
-      u32[o + 10] = rec.bandCount;
       u32[o + 11] = paintKind(cmd.paint);
-      // misc = (opacity, bandMinY, bandH, hardInterior)
+      // misc = (opacity, _, _, hardInterior)
       f32[o + 12] = cmd.opacity;
-      f32[o + 13] = rec.bandMinY;
-      f32[o + 14] = rec.bandH;
       f32[o + 15] = cmd.hardInterior ? 1 : 0;
       f32[o + 36] = cmd.strokeHalf ?? 0; // stroke.x — distance-field half-width
       // stroke.y = butt-cap plane count; capA/capB (floats 40..47) = point + tangent.
@@ -1912,13 +1738,13 @@ export class WebGpuRenderer {
         f32[o + 46] = caps[1].tx;
         f32[o + 47] = caps[1].ty;
       }
-      // tile0 = (tilesX, tilesY, originX, originY); tile1 = (tileSize, stateOffset)
+      // tile0 = (tilesX, tilesY, originX, originY); tile1 = (tileSize, tileTableOffset)
       f32[o + 48] = rec.tilesX;
       f32[o + 49] = rec.tilesY;
       f32[o + 50] = rec.tileOriginX;
       f32[o + 51] = rec.tileOriginY;
       f32[o + 52] = rec.tileSize;
-      f32[o + 53] = rec.tileStateOffset;
+      f32[o + 53] = rec.tileTableOffset;
       this.packPaint(cmd.paint, cmd.screenToLocal, f32, u32, o, stopData);
       draw++;
     }
@@ -2242,9 +2068,8 @@ export class WebGpuRenderer {
     this.adjustParamsBuffer.destroy();
     this.pathParamsBuffer.destroy();
     this.edgeBuffer?.destroy();
-    this.bandTableBuffer?.destroy();
+    this.tileTableBuffer?.destroy();
     this.edgeIndexBuffer?.destroy();
-    this.tileStateBuffer?.destroy();
     this.gradStopsBuffer?.destroy();
     this.solidBuffer?.destroy();
     this.imageBuffer?.destroy();
@@ -2497,7 +2322,7 @@ export class WebGpuRenderer {
       return;
     }
     if (cmd.op === 'draw-path') {
-      if (!this.edgeBuffer || !this.bandTableBuffer || !this.edgeIndexBuffer || !this.gradStopsBuffer || !this.tileStateBuffer) {
+      if (!this.edgeBuffer || !this.tileTableBuffer || !this.edgeIndexBuffer || !this.gradStopsBuffer) {
         return;
       }
       const bindGroup = this.device.createBindGroup({
@@ -2505,10 +2330,9 @@ export class WebGpuRenderer {
         entries: [
           { binding: 0, resource: { buffer: this.edgeBuffer } },
           { binding: 1, resource: { buffer: this.pathParamsBuffer, offset: index * 256, size: 224 } },
-          { binding: 2, resource: { buffer: this.bandTableBuffer } },
+          { binding: 2, resource: { buffer: this.tileTableBuffer } },
           { binding: 3, resource: { buffer: this.edgeIndexBuffer } },
           { binding: 4, resource: { buffer: this.gradStopsBuffer } },
-          { binding: 5, resource: { buffer: this.tileStateBuffer } },
         ],
       });
       pass.setPipeline(this.pathResources.pipeline);

@@ -177,7 +177,10 @@ export function buildTiles(
   bounds: Bounds,
   reach: number,
   tileSize: number,
-  pad = 2
+  pad = 2,
+  /** Fills need the winding backdrop; a distance-field stroke ignores winding, so
+   *  it skips the strip-partials and the backdrop sweep (backdrop stays 0). */
+  computeBackdrop = true
 ): TileGrid {
   const originX = bounds.minX - pad;
   const originY = bounds.minY - pad;
@@ -207,17 +210,19 @@ export function buildTiles(
     // Partial: a strip containing one of the edge's special y-values may cross a
     // rightward ray for some rows of a tile but not others, so it must be in the
     // list of every tile in that strip (the backdrop can't represent it).
-    for (const sy of specialYs(e)) {
-      if (sy < originY || sy > originY + tilesY * tileSize) continue;
-      const r = row(sy);
-      for (let c = 0; c < tilesX; c++) add(r * tilesX + c, ei);
+    if (computeBackdrop) {
+      for (const sy of specialYs(e)) {
+        if (sy < originY || sy > originY + tilesY * tileSize) continue;
+        const r = row(sy);
+        for (let c = 0; c < tilesX; c++) add(r * tilesX + c, ei);
+      }
     }
   });
 
   // True winding at each tile's top-left corner, by one scanline sweep per row.
   const trueW = new Int32Array(tilesX * tilesY);
   const cross: { x: number; s: number }[] = [];
-  for (let r = 0; r < tilesY; r++) {
+  for (let r = 0; computeBackdrop && r < tilesY; r++) {
     const cy = originY + r * tileSize;
     cross.length = 0;
     for (const e of edges) collectCrossings(e, cy, cross);
@@ -239,13 +244,17 @@ export function buildTiles(
   for (let r = 0; r < tilesY; r++) {
     for (let c = 0; c < tilesX; c++) {
       const tile = r * tilesX + c;
-      const cx = originX + c * tileSize;
-      const cy = originY + r * tileSize;
-      let local = 0;
-      for (const ei of sets[tile]) local += windEdge(edges[ei], cx, cy);
+      let backdrop = 0;
+      if (computeBackdrop) {
+        const cx = originX + c * tileSize;
+        const cy = originY + r * tileSize;
+        let local = 0;
+        for (const ei of sets[tile]) local += windEdge(edges[ei], cx, cy);
+        backdrop = trueW[tile] - local;
+      }
       const offset = edgeIndex.length;
       for (const ei of sets[tile]) edgeIndex.push(ei);
-      tiles.push({ offset, count: sets[tile].length, backdrop: trueW[tile] - local });
+      tiles.push({ offset, count: sets[tile].length, backdrop });
     }
   }
 
