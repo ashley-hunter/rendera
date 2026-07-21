@@ -216,9 +216,28 @@ miter apex quad (or bevel triangle) at every corner whose turn exceeds a small
 threshold, miter-limited so acute corners bevel instead of spiking. The wedges
 are exact triangles (no flattening), so corners stay crisp at any zoom, and only
 real corners cost a wedge (the round body covers smooth joins). Stroked serif
-text is now sharp *and* crisp at any zoom. Square/butt caps on *open* paths still
-use the flattened outline stroker (the field would round the ends); closed paths
-and round caps use the field.
+text is now sharp *and* crisp at any zoom.
+
+**Butt/square caps on open paths — also the field.** Every stroke now renders
+through the distance field (the flattened outline stroker is retired from the
+render path), so open curves stay crisp at any zoom too. The two caps the round
+field can't produce on its own are handled at the ends:
+
+- *Butt* — the round capsule overshoots each open end by a half-disc. It's
+  **clipped flat** by a per-terminus half-plane (the endpoint + outward tangent)
+  carried on the centerline draw and applied in the fragment shader:
+  `coverage ← min(coverage, clamp(0.5 − dot(p − end, tangent)))`, giving a ~1px
+  analytic flat edge and sharp corners. The clip is gated to the cap disc
+  (radius ≈ half) so it only trims *that* end's overshoot, never legitimate body
+  elsewhere. Each open subpath is its own draw, so it carries at most two planes.
+- *Square* — the flat 10px-style extension reaches *past* the round end, so it's
+  **added**, not clipped: an exact corner rectangle per terminus (a fill polygon,
+  like a join wedge) that subsumes the round half-disc and squares the corners.
+- *Round* — free from the field.
+
+A latent bug this replaced: the old open-path centerline closed every subpath
+(the fill convention), so a round-capped open stroke drew a phantom edge straight
+across its two ends. The centerline builder now leaves open subpaths open.
 
 A subtlety this exposed: overlap resolution emits cubics, and converting a
 *straight* cubic to a quadratic gives a degenerate quad (`control` on the chord,

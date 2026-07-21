@@ -33,8 +33,8 @@ import {
   type PathEdge,
   type SubPath,
 } from './path';
-import { joinWedges, strokePath } from './stroke';
-import { vec2 } from './vec2';
+import { joinWedges, type StrokeCap } from './stroke';
+import { vec2, type Vec2 } from './vec2';
 
 /** A linear-light RGBA colour, components in [0, 1]. */
 export interface LinearRgba {
@@ -107,6 +107,23 @@ export interface DrawPathCommand {
    * with no offset geometry (so no faceting or self-intersection artifacts).
    */
   readonly strokeHalf?: number;
+  /**
+   * Butt-cap terminus planes for a distance-field stroke (screen space). Each is
+   * a point `(x, y)` on an open end plus the OUTWARD unit tangent `(tx, ty)`; the
+   * backend clips the round capsule against `dot(p − pt, t) ≤ 0` near that
+   * terminus, turning the free round cap into a flat butt cap. Absent/empty ⇒ a
+   * round cap (or a closed path). Square caps add corner fills instead, so they
+   * carry no planes here.
+   */
+  readonly caps?: readonly StrokeCapPlane[];
+}
+
+/** A butt-cap clip plane in screen space: a terminus point + outward unit tangent. */
+export interface StrokeCapPlane {
+  readonly x: number;
+  readonly y: number;
+  readonly tx: number;
+  readonly ty: number;
 }
 
 /** One MSDF glyph quad: a unit-square→screen transform + its atlas UV rect. */
@@ -261,27 +278,153 @@ interface PreparedGeom {
   readonly edges: readonly PathEdge[];
   readonly bounds: Bounds;
 }
+/** A butt-cap clip plane in a shape's LOCAL space (point + outward unit tangent),
+ *  transformed to screen at emit time. */
+interface LocalCapPlane {
+  readonly p: Vec2;
+  readonly t: Vec2;
+}
+/** One distance-field stroke centerline draw: prepared edges + bounds, plus any
+ *  butt-cap terminus planes (empty for closed paths and round/square caps). */
+interface CenterlineDraw extends PreparedGeom {
+  readonly caps: readonly LocalCapPlane[];
+}
 interface GeomEntry {
   sig: string;
   fill: readonly PreparedGeom[];
-  /** Geometric stroke outline (offset polygons), for open butt/square-capped. */
-  stroke: readonly PreparedGeom[];
   /** Resolved stroke *centerline* clusters, for the distance-field stroke body. */
-  centerline: readonly PreparedGeom[];
-  /** Miter/bevel corner wedges (fill), sharpening the distance-field body. */
+  centerline: readonly CenterlineDraw[];
+  /** Miter/bevel join wedges + square-cap corner rects (fill), sharpening the
+   *  round distance-field body into sharp joins/caps. */
   wedges: readonly PreparedGeom[];
 }
 
-/** Whether every subpath is closed (so a stroke has no caps — round-join
- * distance-field stroking is then exact regardless of the cap setting). */
+/** Whether a subpath forms a closed loop (explicitly, or first point == last). */
+function subpathClosed(sp: SubPath): boolean {
+  if (sp.closed) return true;
+  if (sp.segments.length === 0) return true;
+  let cur = sp.start;
+  for (const s of sp.segments) cur = s.to;
+  return Math.hypot(cur.x - sp.start.x, cur.y - sp.start.y) < 1e-6;
+}
+
+/** Whether every subpath is closed (so the stroke has no caps to honour). */
 function allClosed(path: Path): boolean {
-  return path.subpaths.every(
-    (sp) => sp.closed || (sp.segments.length > 0 && (() => {
-      let cur = sp.start;
-      for (const s of sp.segments) cur = s.to;
-      return Math.hypot(cur.x - sp.start.x, cur.y - sp.start.y) < 1e-6;
-    })())
-  );
+  return path.subpaths.every(subpathClosed);
+}
+
+/** Unit vector from `a` to `b` (falls back to +x for a zero-length step). */
+function unitDir(a: Vec2, b: Vec2): Vec2 {
+  const dx = b.x - a.x;
+  const dy = b.y - a.y;
+  const len = Math.hypot(dx, dy);
+  return len > 1e-12 ? vec2(dx / len, dy / len) : vec2(1, 0);
+}
+
+/** The two open termini of a subpath (already quad/line only) as cap planes:
+ *  the endpoint plus the OUTWARD unit tangent (pointing away from the path). */
+function openTermini(sp: SubPath): { start: LocalCapPlane; end: LocalCapPlane } | null {
+  const segs = sp.segments;
+  if (segs.length === 0) return null;
+  const first = segs[0];
+  const afterStart = first.type === 'quad' ? first.control : first.to;
+  const startDir = unitDir(sp.start, afterStart); // into the path at the start
+  let beforeLast = sp.start;
+  for (let i = 0; i < segs.length - 1; i++) beforeLast = segs[i].to;
+  const last = segs[segs.length - 1];
+  const preEnd = last.type === 'quad' ? last.control : beforeLast;
+  const endDir = unitDir(preEnd, last.to); // into the path at the end
+  return {
+    start: { p: sp.start, t: vec2(-startDir.x, -startDir.y) }, // outward = backward
+    end: { p: last.to, t: endDir }, // outward = forward
+  };
+}
+
+/** Edges of a single quad/line subpath. A closing edge back to the start is
+ *  emitted only for closed loops — an open stroke must stay open so its ends are
+ *  true termini (caps), not a phantom segment joining them. */
+function subpathCenterlineEdges(sp: SubPath, closed: boolean): PathEdge[] {
+  const edges: PathEdge[] = [];
+  let cursor = sp.start;
+  for (const seg of sp.segments) {
+    if (seg.type === 'quad') {
+      edges.push({ a: cursor, b: seg.control, c: seg.to, quad: true });
+    } else {
+      edges.push({ a: cursor, b: seg.to, c: seg.to, quad: false });
+    }
+    cursor = seg.to;
+  }
+  if (closed && (cursor.x !== sp.start.x || cursor.y !== sp.start.y)) {
+    edges.push({ a: cursor, b: sp.start, c: sp.start, quad: false });
+  }
+  return edges;
+}
+
+/**
+ * Distance-field stroke centerlines for a quad/line path. Closed subpaths (font
+ * glyphs, closed shapes) cluster together for GPU culling and carry no caps —
+ * the field's round joins wrap continuously. Each OPEN subpath becomes its own
+ * draw so it carries at most two terminus planes (butt caps clip the round
+ * capsule flat; round/square caps carry none — round is the raw field, square
+ * adds corner fills).
+ */
+function buildCenterline(qpath: Path, cap: StrokeCap): CenterlineDraw[] {
+  const draws: CenterlineDraw[] = [];
+  const closedSubs: SubPath[] = [];
+  for (const sp of qpath.subpaths) {
+    if (subpathClosed(sp)) {
+      closedSubs.push(sp);
+      continue;
+    }
+    const edges = subpathCenterlineEdges(sp, false);
+    const bounds = pathBounds({ subpaths: [sp] });
+    if (!bounds || edges.length === 0) continue;
+    let caps: readonly LocalCapPlane[] = [];
+    if (cap === 'butt') {
+      const term = openTermini(sp);
+      if (term) caps = [term.start, term.end];
+    }
+    draws.push({ edges, bounds, caps });
+  }
+  for (const cluster of clusterByBbox({ subpaths: closedSubs })) {
+    const edges = pathEdges(cluster);
+    const bounds = pathBounds(cluster);
+    if (bounds && edges.length > 0) draws.push({ edges, bounds, caps: [] });
+  }
+  return draws;
+}
+
+/** Square-cap corner rectangles for a quad/line path's open termini: each extends
+ *  the endpoint `half` outward along the tangent and `half` to each side. Filled
+ *  (nonzero) they subsume the round capsule's half-disc, squaring the end. */
+function squareCapRects(qpath: Path, half: number): Path {
+  const subpaths: SubPath[] = [];
+  const rect = (cp: LocalCapPlane): void => {
+    const n = vec2(-cp.t.y, cp.t.x); // unit normal across the stroke
+    const e = cp.p;
+    const eo = vec2(e.x + cp.t.x * half, e.y + cp.t.y * half); // pushed out
+    const p0 = vec2(e.x + n.x * half, e.y + n.y * half);
+    const p1 = vec2(eo.x + n.x * half, eo.y + n.y * half);
+    const p2 = vec2(eo.x - n.x * half, eo.y - n.y * half);
+    const p3 = vec2(e.x - n.x * half, e.y - n.y * half);
+    subpaths.push({
+      start: p0,
+      closed: true,
+      segments: [
+        { type: 'line', to: p1 },
+        { type: 'line', to: p2 },
+        { type: 'line', to: p3 },
+      ],
+    });
+  };
+  for (const sp of qpath.subpaths) {
+    if (subpathClosed(sp)) continue;
+    const term = openTermini(sp);
+    if (!term) continue;
+    rect(term.start);
+    rect(term.end);
+  }
+  return { subpaths };
 }
 
 /** Do two AABBs overlap (with a small pad so touching bboxes group)? */
@@ -533,34 +676,31 @@ export function buildRenderList(
     const tol = localTolerance(pathBounds(localPath));
     const fill = prepareClusters(toQuadraticPath(localPath, tol));
 
-    let strokeGeom: PreparedGeom[] = [];
-    let centerline: PreparedGeom[] = [];
+    let centerline: CenterlineDraw[] = [];
     let wedges: PreparedGeom[] = [];
     if (stroke) {
-      // Stroke the shape's *resolved* outline, not the raw contours. Fonts (and
-      // hand-drawn art) routinely self-overlap — a glyph's crossbar running back
-      // through its body, accent marks over stems — which nonzero fill hides but
-      // stroking would ink as spurious seams deep inside the shape. Removing the
-      // overlaps first leaves only the visible edge to stroke.
-      const strokeSource = resolveOverlaps(localPath);
-      const style = { width: stroke.width, cap: stroke.cap, join: stroke.join, miterLimit: stroke.miterLimit };
-      // The distance field renders round joins and round/absent caps exactly.
-      // Use it whenever there are no square/butt caps to honour (closed paths, or
-      // a round cap) — it's resolution-independent, no offset geometry to facet.
-      const dfBody = allClosed(localPath) || (stroke.cap ?? 'butt') === 'round';
-      if (dfBody) {
-        centerline = prepareClusters(toQuadraticPath(strokeSource, tol));
-        // Miter/bevel: sharpen the round body's corners with exact wedge fills.
-        if ((stroke.join ?? 'miter') !== 'round') {
-          wedges = prepareClusters(joinWedges(strokeSource, style, tol));
-        }
-      } else {
-        // Open path with a butt/square cap: fall back to the geometric outline,
-        // which builds those caps (the distance field would round them).
-        strokeGeom = prepareClusters(strokePath(strokeSource, style, tol));
-      }
+      // Every stroke renders through the distance field (crisp, resolution-
+      // independent — no offset geometry to facet at any zoom). Closed contours
+      // (fonts, hand-drawn art) routinely self-overlap — a glyph's crossbar
+      // running back through its body — which nonzero fill hides but stroking
+      // would ink as spurious interior seams; resolve those first. Open paths
+      // have no interior, so they stroke as-is.
+      const closed = allClosed(localPath);
+      const strokeSource = closed ? resolveOverlaps(localPath) : localPath;
+      const q = toQuadraticPath(strokeSource, tol);
+      const cap: StrokeCap = stroke.cap ?? 'butt';
+      const style = { width: stroke.width, cap, join: stroke.join, miterLimit: stroke.miterLimit };
+      // Round joins/caps are exact from the field; butt caps clip it flat via
+      // per-terminus planes carried on each open centerline draw.
+      centerline = buildCenterline(q, cap);
+      // Miter/bevel joins and square caps become exact fill polygons that sharpen
+      // the round body into sharp corners/ends (crisp at any zoom).
+      const extras: SubPath[] = [];
+      if ((stroke.join ?? 'miter') !== 'round') extras.push(...joinWedges(strokeSource, style, tol).subpaths);
+      if (cap === 'square') extras.push(...squareCapRects(q, stroke.width / 2).subpaths);
+      if (extras.length > 0) wedges = prepareClusters({ subpaths: extras });
     }
-    const entry: GeomEntry = { sig, fill, stroke: strokeGeom, centerline, wedges };
+    const entry: GeomEntry = { sig, fill, centerline, wedges };
     geomCache.set(id, entry);
     return entry;
   };
@@ -605,30 +745,24 @@ export function buildRenderList(
     }
 
     if (stroke) {
-      // Geometric outline (non-round joins): filled like any path.
-      for (const c of geom.stroke) {
-        commands.push({
-          op: 'draw-path',
-          nodeId: id,
-          paint: stroke.paint,
-          screenToLocal,
-          fillRule: 'nonzero',
-          opacity,
-          blend,
-          edges: transformEdges(c.edges, screenMat),
-          bounds: transformBoundsAabb(c.bounds, screenMat),
-          hardInterior: true,
-        });
-      }
-      // Distance-field stroke (round joins/caps): the centerline edges plus a
-      // half-width; the backend paints coverage where distance ≤ half. Width is
-      // local, so it scales to screen (device-edge) px by the transform's scale.
+      // Distance-field stroke: the centerline edges plus a half-width; the backend
+      // paints coverage where distance ≤ half (round joins/caps for free). Width
+      // is local, so it scales to screen (device-edge) px by the transform's
+      // scale. Butt-cap termini are carried as screen-space clip planes.
       if (geom.centerline.length > 0) {
         const det = screenMat.a * screenMat.d - screenMat.b * screenMat.c;
         const screenScale = Math.sqrt(Math.abs(det)) || 1;
         const strokeHalf = (stroke.width / 2) * screenScale;
         for (const c of geom.centerline) {
           const b = transformBoundsAabb(c.bounds, screenMat);
+          const caps = c.caps.map((cp) => {
+            const p = transformPoint(screenMat, cp.p);
+            // A tangent is a direction: apply the linear part only, then renormalize.
+            const tx = screenMat.a * cp.t.x + screenMat.c * cp.t.y;
+            const ty = screenMat.b * cp.t.x + screenMat.d * cp.t.y;
+            const len = Math.hypot(tx, ty) || 1;
+            return { x: p.x, y: p.y, tx: tx / len, ty: ty / len };
+          });
           commands.push({
             op: 'draw-path',
             nodeId: id,
@@ -640,6 +774,7 @@ export function buildRenderList(
             edges: transformEdges(c.edges, screenMat),
             bounds: { minX: b.minX - strokeHalf, minY: b.minY - strokeHalf, maxX: b.maxX + strokeHalf, maxY: b.maxY + strokeHalf },
             strokeHalf,
+            caps: caps.length > 0 ? caps : undefined,
           });
         }
       }

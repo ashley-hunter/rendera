@@ -532,7 +532,9 @@ struct PathParams {
   inv0 : vec4f,
   inv1 : vec4f,
   grad : vec4u,
-  stroke : vec4f, // x = distance-field stroke half-width (device px), 0 = fill
+  stroke : vec4f, // x = distance-field stroke half-width (device px), 0 = fill; y = cap-plane count (0..2)
+  capA : vec4f,   // butt-cap terminus A: xy = point, zw = outward unit tangent
+  capB : vec4f,   // butt-cap terminus B
 };
 @group(1) @binding(1) var<uniform> pp : PathParams;
 // Row-band acceleration: bandTable[bandTableOffset + row] = (indexOffset, count)
@@ -553,6 +555,17 @@ struct GradStop { color : vec4f, info : vec4f };
   let dev = mix(lo, hi, corner);
   let clip = vec2f(dev.x / vp.size.x * 2.0 - 1.0, 1.0 - dev.y / vp.size.y * 2.0);
   return vec4f(clip, 0.0, 1.0);
+}
+
+// Butt-cap coverage factor at an open terminus: 1 on the inward side, a ~1px AA
+// ramp across the plane through the endpoint (normal = the outward tangent), 0
+// beyond. Gated to the cap disc so it only trims THIS terminus' round overshoot,
+// never legitimate stroke body elsewhere (a hairpin, a neighbouring subpath).
+fn capClip(p : vec2f, cap : vec4f, half : f32) -> f32 {
+  let d = p - cap.xy;
+  let reach = half + 1.5;
+  if (dot(d, d) > reach * reach) { return 1.0; }
+  return clamp(0.5 - dot(d, cap.zw), 0.0, 1.0);
 }
 
 fn dLine(p : vec2f, a : vec2f, b : vec2f) -> f32 {
@@ -817,6 +830,10 @@ fn paintColor(p : vec2f) -> vec4f {
     // Distance-field stroke: covered where distance to the centerline ≤ half,
     // with a ~1 device-px analytic edge. Round joins/caps for free.
     coverage = clamp(0.5 + (strokeHalf - dist), 0.0, 1.0);
+    // Butt caps: clip the round capsule flat against each open terminus' plane.
+    let capCount = u32(pp.stroke.y);
+    if (capCount > 0u) { coverage = min(coverage, capClip(p, pp.capA, strokeHalf)); }
+    if (capCount > 1u) { coverage = min(coverage, capClip(p, pp.capB, strokeHalf)); }
   } else {
     var inside = winding != 0;
     if (pp.counts.x == 1u) { inside = (winding & 1) != 0; }
@@ -1719,6 +1736,21 @@ export class WebGpuRenderer {
       f32[o + 14] = rec.bandH;
       f32[o + 15] = cmd.hardInterior ? 1 : 0;
       f32[o + 36] = cmd.strokeHalf ?? 0; // stroke.x — distance-field half-width
+      // stroke.y = butt-cap plane count; capA/capB (floats 40..47) = point + tangent.
+      const caps = cmd.caps ?? [];
+      f32[o + 37] = caps.length;
+      if (caps.length > 0) {
+        f32[o + 40] = caps[0].x;
+        f32[o + 41] = caps[0].y;
+        f32[o + 42] = caps[0].tx;
+        f32[o + 43] = caps[0].ty;
+      }
+      if (caps.length > 1) {
+        f32[o + 44] = caps[1].x;
+        f32[o + 45] = caps[1].y;
+        f32[o + 46] = caps[1].tx;
+        f32[o + 47] = caps[1].ty;
+      }
       this.packPaint(cmd.paint, cmd.screenToLocal, f32, u32, o, stopData);
       draw++;
     }
@@ -2303,7 +2335,7 @@ export class WebGpuRenderer {
         layout: this.pathResources.layout,
         entries: [
           { binding: 0, resource: { buffer: this.edgeBuffer } },
-          { binding: 1, resource: { buffer: this.pathParamsBuffer, offset: index * 256, size: 160 } },
+          { binding: 1, resource: { buffer: this.pathParamsBuffer, offset: index * 256, size: 192 } },
           { binding: 2, resource: { buffer: this.bandTableBuffer } },
           { binding: 3, resource: { buffer: this.edgeIndexBuffer } },
           { binding: 4, resource: { buffer: this.gradStopsBuffer } },
