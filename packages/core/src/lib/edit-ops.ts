@@ -16,7 +16,7 @@ import { applyTransform } from './transform-handles';
 import { vec2 } from './vec2';
 
 /** The selected ids with none that is a descendant of another selected id. */
-function roots(doc: SceneDocument, ids: Iterable<NodeId>): NodeId[] {
+export function roots(doc: SceneDocument, ids: Iterable<NodeId>): NodeId[] {
   const set = new Set(ids);
   const out: NodeId[] = [];
   for (const id of set) {

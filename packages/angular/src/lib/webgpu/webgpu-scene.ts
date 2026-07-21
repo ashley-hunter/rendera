@@ -21,6 +21,7 @@ import {
   EMPTY_SELECTION,
   exportSvg,
   fitBounds,
+  groupNodes,
   handleAt,
   handles,
   History,
@@ -40,6 +41,7 @@ import {
   selectionFrame,
   snapMove,
   transformPoint,
+  ungroupNodes,
   vec2,
   ViewportGesture,
   withPixelRatio,
@@ -676,6 +678,12 @@ export class WebGpuScene {
       this.duplicateSelection();
       return;
     }
+    if (mod && (key === 'g' || key === 'G')) {
+      event.preventDefault();
+      if (event.shiftKey) this.ungroupSelection();
+      else this.groupSelection();
+      return;
+    }
     if (key === 'Delete' || key === 'Backspace') {
       event.preventDefault();
       this.deleteSelection();
@@ -702,6 +710,26 @@ export class WebGpuScene {
     if (!ids.length) return;
     const step = coarse ? WebGpuScene.NUDGE_SHIFT : WebGpuScene.NUDGE;
     nudgeNodes(this.document, ids, dir.x * step, dir.y * step);
+    this.rev.update((v) => v + 1);
+    this.draw();
+  }
+
+  /** Group the selection into a new group and select it. One undo entry. */
+  private groupSelection(): void {
+    const ids = [...this.selection().ids];
+    if (ids.length < 2) return;
+    const gid = this.history ? this.history.batch(() => groupNodes(this.document, ids)) : groupNodes(this.document, ids);
+    if (gid) this.selection.set(createSelection([gid]));
+    this.rev.update((v) => v + 1);
+    this.draw();
+  }
+
+  /** Ungroup the selected group(s), selecting the freed children. One undo entry. */
+  private ungroupSelection(): void {
+    const ids = [...this.selection().ids];
+    if (!ids.length) return;
+    const freed = this.history ? this.history.batch(() => ungroupNodes(this.document, ids)) : ungroupNodes(this.document, ids);
+    if (freed.length) this.selection.set(createSelection(freed));
     this.rev.update((v) => v + 1);
     this.draw();
   }

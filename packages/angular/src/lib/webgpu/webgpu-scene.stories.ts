@@ -42,8 +42,9 @@ export const CrispImage: Story = {
  * alignment guides (hold Cmd/Ctrl to move freely). Select **two or more** shapes
  * and the toolbar grows **align** buttons; **three or more** adds **distribute**.
  * **Keyboard**: arrow keys nudge the selection (Shift = a coarser step),
- * **Delete/Backspace** removes it, **Cmd/Ctrl+D** duplicates it, and holding
- * **Space** turns an empty-space drag into a pan. **Undo / Redo** (buttons or
+ * **Delete/Backspace** removes it, **Cmd/Ctrl+D** duplicates it, **Cmd/Ctrl+G**
+ * groups (Shift to ungroup, world-preserving), and holding **Space** turns an
+ * empty-space drag into a pan. **Undo / Redo** (buttons or
  * Cmd/Ctrl+Z, +Shift to redo) step through every edit — a whole drag, or a
  * nudge/delete/duplicate/align, is a single undo. The **SVG** / **PNG** toolbar
  * buttons export the scene as a re-importable vector file and a raster capture.
