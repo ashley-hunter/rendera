@@ -950,7 +950,10 @@ export function buildRenderList(
         if (msdf && !(zoomedPastMsdf && hasAnalytic)) {
           let color = DEFAULT_FILL;
           if (text.fill) {
-            color = text.fill.type === 'solid' ? text.fill.color : text.fill.stops[0]?.color ?? DEFAULT_FILL;
+            // MSDF is single-colour: solid → its colour, gradient → first stop,
+            // image → the default (an image-filled MSDF glyph isn't meaningful).
+            if (text.fill.type === 'solid') color = text.fill.color;
+            else if (text.fill.type !== 'image') color = text.fill.stops[0]?.color ?? DEFAULT_FILL;
           }
           const quads: MsdfQuad[] = [];
           for (const g of msdf.glyphs) {

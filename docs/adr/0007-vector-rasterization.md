@@ -291,3 +291,19 @@ its tiles non-empty). Walking the edge is `O(length)`, bins only the tiles it
 actually crosses, and drops that `V` to **4%** non-empty — so the interior/exterior
 skip finally pays off for all content, curved glyphs included (a magnified glyph
 now lists 3–14× fewer edges across its tiles).
+
+## Follow-up: image & pattern fills
+
+A fourth paint kind (`image`) samples a registered texture into the shape. Its
+`transform` maps the unit image square [0,1]² to the paint target's **local**
+space, so — exactly like gradient geometry — the image places, scales, rotates,
+and shears with the shape under any affine; the backend bakes screen→UV
+(`invert(transform) ∘ screenToLocal`) into the same `inv0/inv1` slots gradients
+use. `spread` selects `pad` (a single placed image), `repeat` (a tiled pattern),
+or `reflect` (mirror-tile). The fill fragment samples a group-2 texture at that
+UV; a 1×1 dummy is bound for solid/gradient draws so the binding is always live.
+The sampler is repeat-address (seamless tiling with no `fract` seam); `pad`
+clamps to a half-texel inset so the edge texel doesn't wrap, and `reflect`
+mirror-tiles in-shader. Because it rides the analytic fill, an image fill inherits
+the same resolution-independent AA and compositing as every other paint, and a
+stroke can be image-painted too.

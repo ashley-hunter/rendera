@@ -14,6 +14,7 @@
  * Being plain data, this is fully serializable and unit-tested with no GPU.
  */
 
+import type { Mat2D } from './matrix';
 import type { LinearRgba } from './render-list';
 import type { Vec2 } from './vec2';
 
@@ -89,14 +90,34 @@ export interface SolidPaint {
   readonly color: LinearRgba;
 }
 
-/** How a fill or stroke is painted: a flat colour or a gradient. */
-export type Paint = SolidPaint | Gradient;
+/**
+ * An image (or repeating pattern) paint: a registered image sampled into the
+ * shape. `transform` maps the unit image square [0,1]² to the paint target's
+ * **local** space — so it places, scales, rotates, and shears the image exactly
+ * like gradient geometry, transforming with the shape under any affine. `spread`
+ * governs sampling outside [0,1]²: `pad` (clamp — a single placed image),
+ * `repeat` (tile — a pattern), or `reflect` (mirror-tile). The backend resolves
+ * `assetId` to a registered texture and samples it analytically per pixel.
+ */
+export interface ImagePaint {
+  readonly type: 'image';
+  /** Registered image asset id (see the backend's image registry). */
+  readonly assetId: string;
+  /** Unit image square [0,1]² → local space. */
+  readonly transform: Mat2D;
+  /** Tiling behaviour outside [0,1]² (default `pad`). */
+  readonly spread?: SpreadMode;
+}
+
+/** How a fill or stroke is painted: a flat colour, a gradient, or an image. */
+export type Paint = SolidPaint | Gradient | ImagePaint;
 
 /** Numeric paint-kind tags shared by the backend packing and shaders. */
 export const PAINT_SOLID = 0;
 export const PAINT_LINEAR = 1;
 export const PAINT_RADIAL = 2;
 export const PAINT_CONIC = 3;
+export const PAINT_IMAGE = 4;
 
 /** The backend's numeric tag for a paint's kind. */
 export function paintKind(paint: Paint): number {
@@ -107,6 +128,8 @@ export function paintKind(paint: Paint): number {
       return PAINT_RADIAL;
     case 'conic-gradient':
       return PAINT_CONIC;
+    case 'image':
+      return PAINT_IMAGE;
     default:
       return PAINT_SOLID;
   }

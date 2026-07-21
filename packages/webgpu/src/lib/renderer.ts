@@ -12,6 +12,9 @@
 
 import {
   blendModeIndex,
+  compose,
+  IDENTITY,
+  invert,
   normalizedStops,
   paintKind,
   spreadIndex,
@@ -53,6 +56,12 @@ interface PathResources {
   layout: GPUBindGroupLayout;
   /** Viewport uniform bound for BOTH stages (the fragment reads the scale). */
   viewportBindGroup: GPUBindGroup;
+  /** Group-2 layout: the image/pattern paint texture + sampler. */
+  paintTexLayout: GPUBindGroupLayout;
+  /** Repeat-address sampler for pattern fills (pad/reflect handled in-shader). */
+  paintSampler: GPUSampler;
+  /** Group-2 bind group for non-image draws (a 1x1 texture, never read). */
+  dummyPaintGroup: GPUBindGroup;
 }
 
 /** GPU resources for the MSDF text pipeline. */
@@ -622,6 +631,11 @@ fn dQuad(pos : vec2f, A : vec2f, B : vec2f, C : vec2f) -> f32 {
   return sqrt(min(dot(q1, q1), dot(q2, q2)));
 }
 
+// Image/pattern paint texture (paint kind 4): sampled at the UV baked into
+// inv0/inv1. A 1x1 dummy is bound for non-image draws (its sample is unused).
+@group(2) @binding(0) var paintTex : texture_2d<f32>;
+@group(2) @binding(1) var paintSamp : sampler;
+
 fn windLine(p : vec2f, a : vec2f, c : vec2f) -> i32 {
   let up = a.y <= p.y && c.y > p.y;
   let down = c.y <= p.y && a.y > p.y;
@@ -779,15 +793,31 @@ fn radialT(pt : vec2f) -> f32 {
   return 1.0;
 }
 
-// Resolve the paint colour (solid or gradient) at a display-pixel position.
+// Resolve the paint colour (solid, gradient, or image) at a display-pixel position.
 fn paintColor(p : vec2f) -> vec4f {
   let kind = pp.counts.w;
   if (kind == 0u) { return pp.color; }
-  // Map the pixel back to gradient (local) space via the screen->local affine.
+  // Map the pixel back to paint space via the baked screen->local (gradient) or
+  // screen->UV (image) affine.
   let local = vec2f(
     pp.inv0.x * p.x + pp.inv0.z * p.y + pp.inv1.x,
     pp.inv0.y * p.x + pp.inv0.w * p.y + pp.inv1.y
   );
+  if (kind == 4u) {
+    // Image/pattern: local is the UV. pad = clamp, reflect = mirror-tile, repeat
+    // leaves it to the repeat-address sampler (seamless, no fract discontinuity).
+    var uv = local;
+    let spread = pp.grad.z;
+    // Sampler is repeat-address; pad clamps to a half-texel inset (so the edge
+    // texel doesn't wrap to the opposite side), reflect mirror-tiles, repeat is raw.
+    if (spread == 0u) {
+      let e = 0.5 / vec2f(textureDimensions(paintTex, 0));
+      uv = clamp(uv, e, vec2f(1.0) - e);
+    } else if (spread == 2u) {
+      uv = abs(fract(uv * 0.5) * 2.0 - vec2f(1.0));
+    }
+    return textureSampleLevel(paintTex, paintSamp, uv, 0.0);
+  }
   var t = 0.0;
   if (kind == 1u) {
     let d = pp.grad0.zw - pp.grad0.xy;
@@ -1336,8 +1366,34 @@ export class WebGpuRenderer {
         { binding: 4, visibility: GPUShaderStage.FRAGMENT, buffer: { type: 'read-only-storage' } },
       ],
     });
+    // Group 2: the image/pattern paint texture + sampler (dummy for non-image draws).
+    const paintTexLayout = device.createBindGroupLayout({
+      entries: [
+        { binding: 0, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'float' } },
+        { binding: 1, visibility: GPUShaderStage.FRAGMENT, sampler: { type: 'filtering' } },
+      ],
+    });
+    const paintSampler = device.createSampler({
+      addressModeU: 'repeat',
+      addressModeV: 'repeat',
+      magFilter: 'linear',
+      minFilter: 'linear',
+      mipmapFilter: 'linear',
+    });
+    const dummyPaintTex = device.createTexture({
+      size: [1, 1],
+      format: IMAGE_FORMAT,
+      usage: GPUTextureUsage.TEXTURE_BINDING,
+    });
+    const dummyPaintGroup = device.createBindGroup({
+      layout: paintTexLayout,
+      entries: [
+        { binding: 0, resource: dummyPaintTex.createView() },
+        { binding: 1, resource: paintSampler },
+      ],
+    });
     const pathPipeline = device.createRenderPipeline({
-      layout: device.createPipelineLayout({ bindGroupLayouts: [pathViewportLayout, pathBindLayout] }),
+      layout: device.createPipelineLayout({ bindGroupLayouts: [pathViewportLayout, pathBindLayout, paintTexLayout] }),
       vertex: {
         module: pathModule,
         entryPoint: 'vs',
@@ -1364,6 +1420,9 @@ export class WebGpuRenderer {
       pipeline: pathPipeline,
       layout: pathBindLayout,
       viewportBindGroup: pathViewportBindGroup,
+      paintTexLayout,
+      paintSampler,
+      dummyPaintGroup,
     };
 
     // --- MSDF text pipeline (glyph quads sampling the distance-field atlas) ---
@@ -1774,6 +1833,19 @@ export class WebGpuRenderer {
       f32[o + 1] = paint.color.g;
       f32[o + 2] = paint.color.b;
       f32[o + 3] = paint.color.a;
+      return;
+    }
+    if (paint.type === 'image') {
+      // inv0/inv1 = screen → image UV = invert(imageTransform) ∘ screenToLocal,
+      // so the fragment maps its pixel straight to a UV. grad.z carries the spread.
+      const m = compose(invert(paint.transform) ?? IDENTITY, screenToLocal);
+      f32[o + 24] = m.a;
+      f32[o + 25] = m.b;
+      f32[o + 26] = m.c;
+      f32[o + 27] = m.d;
+      f32[o + 28] = m.e;
+      f32[o + 29] = m.f;
+      u32[o + 34] = spreadIndex(paint.spread);
       return;
     }
     // grad0 / grad1: geometry in local space (see the shader's PathParams docs).
@@ -2335,9 +2407,24 @@ export class WebGpuRenderer {
           { binding: 4, resource: { buffer: this.gradStopsBuffer } },
         ],
       });
+      // Group 2: the image/pattern paint texture (a dummy for solid/gradient).
+      let paintGroup = this.pathResources.dummyPaintGroup;
+      if (cmd.paint.type === 'image') {
+        const asset = this.imageCache.get(cmd.paint.assetId);
+        if (asset) {
+          paintGroup = this.device.createBindGroup({
+            layout: this.pathResources.paintTexLayout,
+            entries: [
+              { binding: 0, resource: asset.texture.createView() },
+              { binding: 1, resource: this.pathResources.paintSampler },
+            ],
+          });
+        }
+      }
       pass.setPipeline(this.pathResources.pipeline);
       pass.setBindGroup(0, this.pathResources.viewportBindGroup);
       pass.setBindGroup(1, bindGroup);
+      pass.setBindGroup(2, paintGroup);
       pass.setVertexBuffer(0, this.unitQuadBuffer);
       pass.draw(4);
       return;
