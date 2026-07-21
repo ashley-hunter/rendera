@@ -26,13 +26,18 @@
       (pointercancel)="onPointerUp($event)"
       (wheel)="onWheel($event)"
     ></canvas>
-    @if (selectable() && overlay(); as ov) {
+    @if (selectable()) {
       <svg class="handles" aria-hidden="true">
-        <line class="rot-line" [attr.x1]="ov.topC.x" [attr.y1]="ov.topC.y" [attr.x2]="ov.rotate.x" [attr.y2]="ov.rotate.y" />
-        <polygon class="frame-outline" [attr.points]="ov.poly" />
-        <circle class="grip rot" [attr.cx]="ov.rotate.x" [attr.cy]="ov.rotate.y" r="6" />
-        @for (g of ov.grips; track g.id) {
-          <rect class="grip" [attr.x]="g.x - 5" [attr.y]="g.y - 5" width="10" height="10" />
+        @for (l of guideLines(); track $index) {
+          <line class="snap-guide" [attr.x1]="l.x1" [attr.y1]="l.y1" [attr.x2]="l.x2" [attr.y2]="l.y2" />
+        }
+        @if (overlay(); as ov) {
+          <line class="rot-line" [attr.x1]="ov.topC.x" [attr.y1]="ov.topC.y" [attr.x2]="ov.rotate.x" [attr.y2]="ov.rotate.y" />
+          <polygon class="frame-outline" [attr.points]="ov.poly" />
+          <circle class="grip rot" [attr.cx]="ov.rotate.x" [attr.cy]="ov.rotate.y" r="6" />
+          @for (g of ov.grips; track g.id) {
+            <rect class="grip" [attr.x]="g.x - 5" [attr.y]="g.y - 5" width="10" height="10" />
+          }
         }
       </svg>
     }

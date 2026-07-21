@@ -88,6 +88,12 @@
   stroke-width: 1.5;
 }
 
+.handles .snap-guide {
+  stroke: #ff36b0;
+  stroke-width: 1;
+  shape-rendering: crispEdges;
+}
+
 .overlay {
   position: absolute;
   inset: 0;

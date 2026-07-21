@@ -32,13 +32,16 @@ import {
   RenderaFont,
   resolveSelectionClick,
   screenToWorld,
+  selectionBounds,
   selectionFrame,
+  snapMove,
   transformPoint,
   vec2,
   ViewportGesture,
   withPixelRatio,
   worldToScreen,
   zoomAround,
+  type Bounds,
   type Camera,
   type HandleId,
   type Mat2D,
@@ -47,6 +50,7 @@ import {
   type Path,
   type SceneDocument,
   type Selection,
+  type SnapGuide,
   type SpatialNode,
   type TextNode,
   type Transform,
@@ -127,7 +131,12 @@ export class WebGpuScene {
   private dragStart: Vec2 | null = null;
   private dragSnapshot = new Map<NodeId, Transform>();
   private dragDelta: Mat2D | null = null;
+  /** Pre-drag world bounds of the moving selection (for alignment snapping). */
+  private dragBounds: Bounds | null = null;
   private history: History | null = null;
+
+  /** Live alignment guides (world space) shown while a move-drag snaps. */
+  private readonly snapGuides = signal<readonly SnapGuide[]>([]);
 
   /** Reactive undo/redo availability (recomputes when `rev` bumps). */
   protected readonly canUndo = computed(() => (this.rev(), this.history?.canUndo ?? false));
@@ -161,6 +170,16 @@ export class WebGpuScene {
       rotate: rot,
       topC,
     };
+  });
+
+  /** Alignment guides projected to CSS px (each an x1/y1→x2/y2 line segment). */
+  protected readonly guideLines = computed(() => {
+    const cam = this.camera();
+    return this.snapGuides().map((g) => {
+      const a = worldToScreen(cam, g.axis === 'x' ? vec2(g.position, g.start) : vec2(g.start, g.position));
+      const b = worldToScreen(cam, g.axis === 'x' ? vec2(g.position, g.end) : vec2(g.end, g.position));
+      return { x1: a.x, y1: a.y, x2: b.x, y2: b.y };
+    });
   });
 
   private document: SceneDocument = createSampleDocument();
@@ -382,10 +401,19 @@ export class WebGpuScene {
     if (this.dragHandle && this.dragBox && this.dragStart) {
       this.pointerMoved = true;
       this.beginInteraction();
-      const delta = dragTransform(this.dragBox, this.dragHandle, this.dragStart, screenToWorld(this.camera(), pt), {
+      let delta = dragTransform(this.dragBox, this.dragHandle, this.dragStart, screenToWorld(this.camera(), pt), {
         uniform: event.shiftKey,
         fromCentre: event.altKey,
       });
+      // A move-drag snaps its translation to nearby shapes' edges/centres, unless
+      // a modifier is held for free movement. Resize/rotate never snap.
+      if (this.dragHandle === 'move' && !(event.ctrlKey || event.metaKey)) {
+        const res = snapMove(this.document, [...this.dragSnapshot.keys()], this.dragBounds, vec2(delta.e, delta.f), {
+          threshold: 6 / this.camera().zoom,
+        });
+        delta = { a: 1, b: 0, c: 0, d: 1, e: res.delta.x, f: res.delta.y };
+        this.snapGuides.set(res.guides);
+      }
       this.dragDelta = delta;
       // Live preview only — not recorded. Restore the snapshot, then apply the
       // from-start delta (so the drag never compounds).
@@ -426,7 +454,9 @@ export class WebGpuScene {
       this.dragBox = null;
       this.dragStart = null;
       this.dragDelta = null;
+      this.dragBounds = null;
       this.dragSnapshot.clear();
+      this.snapGuides.set([]);
       return;
     }
     this.gesture.up(event.pointerId);
@@ -452,6 +482,7 @@ export class WebGpuScene {
       const node = this.document.get(id) as SpatialNode | undefined;
       if (node && 'transform' in node) this.dragSnapshot.set(id, node.transform);
     }
+    this.dragBounds = selectionBounds(this.document, [...this.dragSnapshot.keys()]);
     this.beginInteraction();
   }
 

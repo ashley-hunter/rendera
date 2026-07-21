@@ -22,6 +22,7 @@ export * from './lib/png';
 export * from './lib/hit-test';
 export * from './lib/transform-handles';
 export * from './lib/edit-ops';
+export * from './lib/snapping';
 export * from './lib/render-list';
 
 // Transform math. `matrix` also defines `approxEquals`; it is re-exported here

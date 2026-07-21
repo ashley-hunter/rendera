@@ -37,7 +37,9 @@ export const CrispImage: Story = {
  * fills, and stroke width. The selection shows an **oriented frame with handles**:
  * drag the body to **move**, a corner/edge to **scale** (shift = keep aspect, alt
  * = from centre), or the top grip to **rotate**. The frame stays oriented with a
- * rotated shape, so scaling never skews it. **Keyboard**: arrow keys nudge the
+ * rotated shape, so scaling never skews it. While you **move** a shape it
+ * **snaps** its edges and centre to nearby shapes, drawing pink alignment guides
+ * (hold Cmd/Ctrl to move freely). **Keyboard**: arrow keys nudge the
  * selection (Shift = a coarser step), **Delete/Backspace** removes it, and
  * **Cmd/Ctrl+D** duplicates it (the copies become the new selection). **Undo /
  * Redo** (buttons or Cmd/Ctrl+Z, +Shift to redo) step through every edit — a
