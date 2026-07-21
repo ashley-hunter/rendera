@@ -18,11 +18,13 @@ import {
   fitBounds,
   handleAt,
   handles,
+  History,
   hitTest,
   layoutTextNode,
   layoutTextNodeGlyphs,
   MsdfAtlas,
   panBy,
+  pruneSelection,
   RenderaFont,
   resolveSelectionClick,
   screenToWorld,
@@ -120,6 +122,12 @@ export class WebGpuScene {
   private dragBox: Mat2D | null = null;
   private dragStart: Vec2 | null = null;
   private dragSnapshot = new Map<NodeId, Transform>();
+  private dragDelta: Mat2D | null = null;
+  private history: History | null = null;
+
+  /** Reactive undo/redo availability (recomputes when `rev` bumps). */
+  protected readonly canUndo = computed(() => (this.rev(), this.history?.canUndo ?? false));
+  protected readonly canRedo = computed(() => (this.rev(), this.history?.canRedo ?? false));
 
   /** The selection's oriented frame (unit box → world), or null. */
   private readonly frameBox = computed<Mat2D | null>(() => {
@@ -196,6 +204,7 @@ export class WebGpuScene {
         this.camera.set(source.camera);
       }
     }
+    this.history = new History(this.document, { limit: 200 });
     this.sizeCanvas(canvas);
     try {
       this.renderer = await WebGpuRenderer.create(canvas, {
@@ -369,13 +378,19 @@ export class WebGpuScene {
     if (this.dragHandle && this.dragBox && this.dragStart) {
       this.pointerMoved = true;
       this.beginInteraction();
-      // Restore the snapshot, then apply the from-start delta (never compounding).
-      for (const [id, t] of this.dragSnapshot) this.document.update(id, { transform: t });
       const delta = dragTransform(this.dragBox, this.dragHandle, this.dragStart, screenToWorld(this.camera(), pt), {
         uniform: event.shiftKey,
         fromCentre: event.altKey,
       });
-      applyTransform(this.document, [...this.dragSnapshot.keys()], delta);
+      this.dragDelta = delta;
+      // Live preview only — not recorded. Restore the snapshot, then apply the
+      // from-start delta (so the drag never compounds).
+      const run = (): void => {
+        for (const [id, t] of this.dragSnapshot) this.document.update(id, { transform: t });
+        applyTransform(this.document, [...this.dragSnapshot.keys()], delta);
+      };
+      if (this.history) this.history.withoutHistory(run);
+      else run();
       this.rev.update((v) => v + 1);
       this.draw();
       return;
@@ -390,9 +405,23 @@ export class WebGpuScene {
 
   protected onPointerUp(event: PointerEvent): void {
     if (this.dragHandle) {
+      // Commit the whole drag as ONE undo entry: restore to the pre-drag snapshot
+      // without history, then apply the net delta inside a transaction (records a
+      // single before→after per node).
+      if (this.dragDelta && this.history) {
+        const ids = [...this.dragSnapshot.keys()];
+        const snap = this.dragSnapshot;
+        const delta = this.dragDelta;
+        this.history.withoutHistory(() => {
+          for (const [id, t] of snap) this.document.update(id, { transform: t });
+        });
+        this.document.transaction(() => applyTransform(this.document, ids, delta));
+        this.rev.update((v) => v + 1);
+      }
       this.dragHandle = null;
       this.dragBox = null;
       this.dragStart = null;
+      this.dragDelta = null;
       this.dragSnapshot.clear();
       return;
     }
@@ -413,12 +442,45 @@ export class WebGpuScene {
     this.dragHandle = handle;
     this.dragBox = this.frameBox();
     this.dragStart = screenToWorld(this.camera(), canvasPt);
+    this.dragDelta = null;
     this.dragSnapshot = new Map();
     for (const id of this.selection().ids) {
       const node = this.document.get(id) as SpatialNode | undefined;
       if (node && 'transform' in node) this.dragSnapshot.set(id, node.transform);
     }
     this.beginInteraction();
+  }
+
+  /** Undo the last edit (a whole drag is one step). */
+  protected undo(): void {
+    if (this.history?.undo()) this.afterHistory();
+  }
+
+  /** Redo the last undone edit. */
+  protected redo(): void {
+    if (this.history?.redo()) this.afterHistory();
+  }
+
+  private afterHistory(): void {
+    // History only changed transforms here, but prune in case a future edit
+    // removed a selected node.
+    this.selection.update((s) => pruneSelection(s, this.document));
+    this.rev.update((v) => v + 1);
+    this.draw();
+  }
+
+  /** Keyboard: Cmd/Ctrl+Z = undo, +Shift or Ctrl+Y = redo (editing only). */
+  protected onKey(event: KeyboardEvent): void {
+    if (!this.selectable()) return;
+    const mod = event.ctrlKey || event.metaKey;
+    if (mod && (event.key === 'z' || event.key === 'Z')) {
+      event.preventDefault();
+      if (event.shiftKey) this.redo();
+      else this.undo();
+    } else if (mod && (event.key === 'y' || event.key === 'Y')) {
+      event.preventDefault();
+      this.redo();
+    }
   }
 
   /** Download the scene as an SVG file (vector, re-importable). */

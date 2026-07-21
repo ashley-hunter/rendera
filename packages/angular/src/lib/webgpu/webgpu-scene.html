@@ -1,6 +1,10 @@
-<div class="webgpu-scene">
+<div class="webgpu-scene" tabindex="0" (keydown)="onKey($event)">
   <div class="toolbar">
     <button type="button" (click)="fit()" [disabled]="renderState() !== 'ready'">Fit</button>
+    @if (selectable()) {
+      <button type="button" (click)="undo()" [disabled]="!canUndo()" title="Undo (Ctrl/Cmd+Z)">Undo</button>
+      <button type="button" (click)="redo()" [disabled]="!canRedo()" title="Redo (Ctrl/Cmd+Shift+Z)">Redo</button>
+    }
     @if (exportable()) {
       <button type="button" (click)="exportSvgFile()" [disabled]="renderState() !== 'ready'">SVG</button>
       <button type="button" (click)="exportPngFile()" [disabled]="renderState() !== 'ready'">PNG</button>
