@@ -79,5 +79,13 @@
         (reorder)="onLayerReorder($event)"
       />
     }
+    @if (showInspector()) {
+      <rendera-inspector-panel
+        [document]="doc()"
+        [selection]="selection()"
+        [rev]="revValue()"
+        (changed)="onInspectorChanged()"
+      />
+    }
   </div>
 </div>

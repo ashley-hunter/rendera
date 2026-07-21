@@ -47,12 +47,15 @@ export const CrispImage: Story = {
  * Cmd/Ctrl+Z, +Shift to redo) step through every edit — a whole drag, or a
  * nudge/delete/duplicate/align, is a single undo. The **SVG** / **PNG** toolbar
  * buttons export the scene as a re-importable vector file and a raster capture.
- * The **layers panel** on the right mirrors the document tree (front-to-back):
- * click a row to select it, toggle the dot to hide/show a node, and drag rows to
- * reorder or drop them into a group. Wheel / pinch zooms.
+ * The **layers panel** mirrors the document tree (front-to-back): click a row to
+ * select it, toggle the dot to hide/show a node, and drag rows to reorder or drop
+ * them into a group. The **properties inspector** edits the selection — opacity,
+ * blend mode, and visibility for any selection; fill/stroke colour, stroke width,
+ * and X/Y position for a single shape — each edit a single undo. Wheel / pinch
+ * zooms.
  */
 export const Editor: Story = {
-  args: { scene: createVectorScene(), selectable: true, exportable: true, showLayers: true },
+  args: { scene: createVectorScene(), selectable: true, exportable: true, showLayers: true, showInspector: true },
 };
 
 /**

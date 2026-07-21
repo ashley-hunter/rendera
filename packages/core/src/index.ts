@@ -25,6 +25,7 @@ export * from './lib/edit-ops';
 export * from './lib/snapping';
 export * from './lib/layers';
 export * from './lib/align';
+export * from './lib/color';
 export * from './lib/render-list';
 
 // Transform math. `matrix` also defines `approxEquals`; it is re-exported here

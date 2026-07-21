@@ -65,6 +65,7 @@ import {
 } from '@rendera/core';
 import { WebGpuRenderer } from '@rendera/webgpu';
 import { createSampleDocument } from '../sample-scene';
+import { InspectorPanel } from './inspector-panel';
 import { LayersPanel, type LayerReorder } from './layers-panel';
 
 type Status = 'pending' | 'ready' | 'unsupported';
@@ -107,7 +108,7 @@ export interface SceneSource {
  */
 @Component({
   selector: 'rendera-webgpu-scene',
-  imports: [LayersPanel],
+  imports: [LayersPanel, InspectorPanel],
   templateUrl: './webgpu-scene.html',
   styleUrl: './webgpu-scene.css',
   changeDetection: ChangeDetectionStrategy.OnPush,
@@ -124,6 +125,8 @@ export class WebGpuScene {
   readonly exportable = input(false);
   /** Show the layers panel beside the canvas (default off; implies selectable). */
   readonly showLayers = input(false);
+  /** Show the properties inspector beside the canvas (default off; implies selectable). */
+  readonly showInspector = input(false);
 
   /** The document exposed to the layers panel. */
   protected doc(): SceneDocument {
@@ -601,6 +604,12 @@ export class WebGpuScene {
       this.rev.update((v) => v + 1);
       this.draw();
     }
+  }
+
+  /** The inspector edited the primary selection's properties; refresh + redraw. */
+  protected onInspectorChanged(): void {
+    this.rev.update((v) => v + 1);
+    this.draw();
   }
 
   // --- align & distribute --------------------------------------------------

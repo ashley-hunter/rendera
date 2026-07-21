@@ -1,0 +1,110 @@
+.inspector-panel {
+  display: flex;
+  flex-direction: column;
+  width: 200px;
+  background: #141418;
+  border-left: 1px solid #333;
+  font-family: system-ui, sans-serif;
+  color: #ddd;
+  user-select: none;
+}
+
+.panel-title {
+  padding: 8px 10px;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: #888;
+  border-bottom: 1px solid #2a2a30;
+}
+
+.fields {
+  padding: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  overflow-y: auto;
+}
+
+.multi-note {
+  font-size: 11px;
+  color: #4aa3ff;
+}
+
+.section {
+  margin-top: 4px;
+  padding-top: 6px;
+  border-top: 1px solid #2a2a30;
+  font-size: 11px;
+  color: #888;
+  text-transform: capitalize;
+}
+
+.field {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+}
+
+.label {
+  width: 54px;
+  flex: none;
+  color: #aaa;
+}
+
+.control {
+  flex: 1;
+  min-width: 0;
+}
+
+span.control {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.value {
+  font-family: ui-monospace, monospace;
+  font-size: 11px;
+  color: #999;
+  min-width: 34px;
+  text-align: right;
+}
+
+input[type='range'] {
+  flex: 1;
+  min-width: 0;
+}
+
+select.control,
+input.num {
+  background: #22222a;
+  color: #eee;
+  border: 1px solid #3a3a42;
+  border-radius: 4px;
+  padding: 3px 5px;
+  font-size: 12px;
+}
+
+input.num {
+  width: 100%;
+  font-family: ui-monospace, monospace;
+}
+
+input.swatch {
+  width: 40px;
+  height: 22px;
+  padding: 0;
+  border: 1px solid #3a3a42;
+  border-radius: 4px;
+  background: none;
+  cursor: pointer;
+}
+
+.empty {
+  padding: 12px 10px;
+  font-size: 12px;
+  color: #666;
+}

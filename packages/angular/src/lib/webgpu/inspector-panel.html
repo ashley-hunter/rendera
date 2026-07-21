@@ -1,0 +1,65 @@
+<div class="inspector-panel">
+  <div class="panel-title">Properties</div>
+  @if (model(); as m) {
+    <div class="fields">
+      @if (m.count > 1) {
+        <div class="multi-note">{{ m.count }} selected</div>
+      }
+
+      <label class="field">
+        <span class="label">Opacity</span>
+        <span class="control">
+          <input type="range" min="0" max="100" step="1" [value]="m.opacity" (input)="setOpacity($any($event.target).value)" />
+          <span class="value">{{ m.opacity }}%</span>
+        </span>
+      </label>
+
+      <label class="field">
+        <span class="label">Blend</span>
+        <select class="control" [value]="m.blendMode" (change)="setBlend($any($event.target).value)">
+          @for (mode of blendModes; track mode) {
+            <option [value]="mode">{{ mode }}</option>
+          }
+        </select>
+      </label>
+
+      <label class="field">
+        <span class="label">Visible</span>
+        <input type="checkbox" [checked]="m.visible" (change)="setVisible($any($event.target).checked)" />
+      </label>
+
+      @if (m.single; as s) {
+        <div class="section">{{ s.type }}</div>
+
+        <label class="field">
+          <span class="label">X</span>
+          <input type="number" class="control num" [value]="s.x" (change)="setX($any($event.target).value)" />
+        </label>
+        <label class="field">
+          <span class="label">Y</span>
+          <input type="number" class="control num" [value]="s.y" (change)="setY($any($event.target).value)" />
+        </label>
+
+        @if (s.fillHex !== null) {
+          <label class="field">
+            <span class="label">Fill</span>
+            <input type="color" class="control swatch" [value]="s.fillHex" (input)="setFill($any($event.target).value)" />
+          </label>
+        }
+
+        @if (s.strokeWidth !== null) {
+          <label class="field">
+            <span class="label">Stroke</span>
+            <input type="color" class="control swatch" [value]="s.strokeHex ?? '#000000'" (input)="setStrokeColor($any($event.target).value)" />
+          </label>
+          <label class="field">
+            <span class="label">Width</span>
+            <input type="number" min="0" step="0.5" class="control num" [value]="s.strokeWidth" (change)="setStrokeWidth($any($event.target).value)" />
+          </label>
+        }
+      }
+    </div>
+  } @else {
+    <div class="empty">Nothing selected</div>
+  }
+</div>
