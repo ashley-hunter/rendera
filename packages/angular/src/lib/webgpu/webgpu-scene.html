@@ -25,6 +25,15 @@
           <button type="button" class="icon" (click)="distribute('vertical')" title="Distribute vertically">↕</button>
         </span>
       }
+      @if (canBoolean()) {
+        <span class="divider"></span>
+        <span class="group" role="group" aria-label="Boolean">
+          <button type="button" class="icon" (click)="boolean('union')" title="Union">∪</button>
+          <button type="button" class="icon" (click)="boolean('difference')" title="Subtract">−</button>
+          <button type="button" class="icon" (click)="boolean('intersect')" title="Intersect">∩</button>
+          <button type="button" class="icon" (click)="boolean('xor')" title="Exclude (XOR)">⊕</button>
+        </span>
+      }
     }
     <span class="hint">
       @if (selectable()) { click / drag = select · space-drag = pan · arrows = nudge · ⌫ = delete · ⌘D = duplicate · ⌘G = group · }@if (!selectable()) { drag = pan · }wheel / pinch = zoom

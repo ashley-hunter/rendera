@@ -28,6 +28,7 @@ import {
   hitTest,
   layoutTextNode,
   layoutTextNodeGlyphs,
+  makeBoolean,
   moveNode,
   MsdfAtlas,
   nodesInBox,
@@ -48,6 +49,7 @@ import {
   worldToScreen,
   zoomAround,
   type AlignEdge,
+  type BooleanOp,
   type Bounds,
   type Camera,
   type DistributeAxis,
@@ -175,6 +177,19 @@ export class WebGpuScene {
 
   /** Number of selected nodes (gates the align / distribute toolbar). */
   protected readonly selectionCount = computed(() => this.selection().ids.size);
+
+  /** Whether 2+ selected nodes are path/boolean operands (gates the boolean toolbar). */
+  protected readonly canBoolean = computed(() => {
+    this.rev();
+    let n = 0;
+    for (const id of this.selection().ids) {
+      const t = this.document.get(id)?.type;
+      if (t === 'path' || t === 'boolean') {
+        if (++n >= 2) return true;
+      }
+    }
+    return false;
+  });
 
   /** The selection's oriented frame (unit box → world), or null. */
   private readonly frameBox = computed<Mat2D | null>(() => {
@@ -636,6 +651,18 @@ export class WebGpuScene {
     else run();
     this.rev.update((v) => v + 1);
     this.draw();
+  }
+
+  /** Combine the selected shapes into a non-destructive boolean (one undo step). */
+  protected boolean(op: BooleanOp): void {
+    const ids = [...this.selection().ids];
+    const run = (): NodeId | null => makeBoolean(this.document, ids, op);
+    const id = this.history ? this.history.batch(run) : run();
+    if (id) {
+      this.selection.set(createSelection([id]));
+      this.rev.update((v) => v + 1);
+      this.draw();
+    }
   }
 
   /** Arrow-key nudge distance in world units (Shift = a coarser step). */

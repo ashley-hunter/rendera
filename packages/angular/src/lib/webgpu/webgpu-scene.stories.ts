@@ -41,6 +41,8 @@ export const CrispImage: Story = {
  * shape it **snaps** its edges and centre to nearby shapes, drawing pink
  * alignment guides (hold Cmd/Ctrl to move freely). Select **two or more** shapes
  * and the toolbar grows **align** buttons; **three or more** adds **distribute**.
+ * Select two or more shapes and the **boolean** buttons combine them non-
+ * destructively (union / subtract / intersect / exclude) into one editable path.
  * **Keyboard**: arrow keys nudge the selection (Shift = a coarser step),
  * **Delete/Backspace** removes it, **Cmd/Ctrl+D** duplicates it, **Cmd/Ctrl+G**
  * groups (Shift to ungroup, world-preserving), and holding **Space** turns an
