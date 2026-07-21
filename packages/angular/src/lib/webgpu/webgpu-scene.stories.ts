@@ -32,23 +32,24 @@ export const CrispImage: Story = {
 };
 
 /**
- * Interactive editing. **Click** a shape to select it (empty space clears,
- * shift-click adds/removes) — hit-testing respects transforms, winding-rule
- * fills, and stroke width. The selection shows an **oriented frame with handles**:
- * drag the body to **move**, a corner/edge to **scale** (shift = keep aspect, alt
- * = from centre), or the top grip to **rotate**. The frame stays oriented with a
- * rotated shape, so scaling never skews it. While you **move** a shape it
- * **snaps** its edges and centre to nearby shapes, drawing pink alignment guides
- * (hold Cmd/Ctrl to move freely). **Keyboard**: arrow keys nudge the
- * selection (Shift = a coarser step), **Delete/Backspace** removes it, and
- * **Cmd/Ctrl+D** duplicates it (the copies become the new selection). **Undo /
- * Redo** (buttons or Cmd/Ctrl+Z, +Shift to redo) step through every edit — a
- * whole drag, or a nudge/delete/duplicate, is a single undo. The **SVG** /
- * **PNG** toolbar buttons export the scene as a re-importable vector file and a
- * raster capture. The **layers panel** on the right mirrors the document tree
- * (front-to-back): click a row to select it, toggle the dot to hide/show a node,
- * and drag rows to reorder or drop them into a group. Empty-space drag still
- * pans, wheel zooms.
+ * Interactive editing. **Click** a shape to select it, or **drag from empty
+ * space** to rubber-band select (shift adds); hit-testing respects transforms,
+ * winding-rule fills, and stroke width. The selection shows an **oriented frame
+ * with handles**: drag the body to **move**, a corner/edge to **scale** (shift =
+ * keep aspect, alt = from centre), or the top grip to **rotate**. The frame stays
+ * oriented with a rotated shape, so scaling never skews it. While you **move** a
+ * shape it **snaps** its edges and centre to nearby shapes, drawing pink
+ * alignment guides (hold Cmd/Ctrl to move freely). Select **two or more** shapes
+ * and the toolbar grows **align** buttons; **three or more** adds **distribute**.
+ * **Keyboard**: arrow keys nudge the selection (Shift = a coarser step),
+ * **Delete/Backspace** removes it, **Cmd/Ctrl+D** duplicates it, and holding
+ * **Space** turns an empty-space drag into a pan. **Undo / Redo** (buttons or
+ * Cmd/Ctrl+Z, +Shift to redo) step through every edit — a whole drag, or a
+ * nudge/delete/duplicate/align, is a single undo. The **SVG** / **PNG** toolbar
+ * buttons export the scene as a re-importable vector file and a raster capture.
+ * The **layers panel** on the right mirrors the document tree (front-to-back):
+ * click a row to select it, toggle the dot to hide/show a node, and drag rows to
+ * reorder or drop them into a group. Wheel / pinch zooms.
  */
 export const Editor: Story = {
   args: { scene: createVectorScene(), selectable: true, exportable: true, showLayers: true },

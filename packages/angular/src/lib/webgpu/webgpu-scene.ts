@@ -9,10 +9,12 @@ import {
   viewChild,
 } from '@angular/core';
 import {
+  alignNodes,
   applyTransform,
   buildRenderList,
   createCamera,
   createSelection,
+  distributeNodes,
   deleteNodes,
   dragTransform,
   duplicateNodes,
@@ -43,8 +45,10 @@ import {
   withPixelRatio,
   worldToScreen,
   zoomAround,
+  type AlignEdge,
   type Bounds,
   type Camera,
+  type DistributeAxis,
   type HandleId,
   type Mat2D,
   type MsdfNodeLayout,
@@ -163,6 +167,9 @@ export class WebGpuScene {
   /** Reactive undo/redo availability (recomputes when `rev` bumps). */
   protected readonly canUndo = computed(() => (this.rev(), this.history?.canUndo ?? false));
   protected readonly canRedo = computed(() => (this.rev(), this.history?.canRedo ?? false));
+
+  /** Number of selected nodes (gates the align / distribute toolbar). */
+  protected readonly selectionCount = computed(() => this.selection().ids.size);
 
   /** The selection's oriented frame (unit box → world), or null. */
   private readonly frameBox = computed<Mat2D | null>(() => {
@@ -594,6 +601,30 @@ export class WebGpuScene {
       this.rev.update((v) => v + 1);
       this.draw();
     }
+  }
+
+  // --- align & distribute --------------------------------------------------
+
+  /** Align the selection's chosen edge/centre to its bounding box (one undo step). */
+  protected align(edge: AlignEdge): void {
+    const ids = [...this.selection().ids];
+    if (ids.length < 2) return;
+    const run = (): void => alignNodes(this.document, ids, edge);
+    if (this.history) this.history.batch(run);
+    else run();
+    this.rev.update((v) => v + 1);
+    this.draw();
+  }
+
+  /** Evenly space the selection's centres along an axis (one undo step). */
+  protected distribute(axis: DistributeAxis): void {
+    const ids = [...this.selection().ids];
+    if (ids.length < 3) return;
+    const run = (): void => distributeNodes(this.document, ids, axis);
+    if (this.history) this.history.batch(run);
+    else run();
+    this.rev.update((v) => v + 1);
+    this.draw();
   }
 
   /** Arrow-key nudge distance in world units (Shift = a coarser step). */

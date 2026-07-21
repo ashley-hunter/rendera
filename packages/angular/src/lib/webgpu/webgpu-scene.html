@@ -9,6 +9,23 @@
       <button type="button" (click)="exportSvgFile()" [disabled]="renderState() !== 'ready'">SVG</button>
       <button type="button" (click)="exportPngFile()" [disabled]="renderState() !== 'ready'">PNG</button>
     }
+    @if (selectable() && selectionCount() >= 2) {
+      <span class="divider"></span>
+      <span class="group" role="group" aria-label="Align">
+        <button type="button" class="icon" (click)="align('left')" title="Align left">⇤</button>
+        <button type="button" class="icon" (click)="align('hcenter')" title="Align horizontal centres">⇹</button>
+        <button type="button" class="icon" (click)="align('right')" title="Align right">⇥</button>
+        <button type="button" class="icon" (click)="align('top')" title="Align top">⤒</button>
+        <button type="button" class="icon" (click)="align('vcenter')" title="Align vertical centres">⇳</button>
+        <button type="button" class="icon" (click)="align('bottom')" title="Align bottom">⤓</button>
+      </span>
+      @if (selectionCount() >= 3) {
+        <span class="group" role="group" aria-label="Distribute">
+          <button type="button" class="icon" (click)="distribute('horizontal')" title="Distribute horizontally">↔</button>
+          <button type="button" class="icon" (click)="distribute('vertical')" title="Distribute vertically">↕</button>
+        </span>
+      }
+    }
     <span class="hint">
       @if (selectable()) { click / drag = select · space-drag = pan · arrows = nudge · ⌫ = delete · ⌘D = duplicate · }@if (!selectable()) { drag = pan · }wheel / pinch = zoom
     </span>

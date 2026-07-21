@@ -34,6 +34,26 @@
   cursor: default;
 }
 
+.toolbar .divider {
+  width: 1px;
+  align-self: stretch;
+  background: #3a3a42;
+  margin: 2px 2px;
+}
+
+.toolbar .group {
+  display: inline-flex;
+  gap: 2px;
+}
+
+.toolbar button.icon {
+  min-width: 26px;
+  padding: 4px 6px;
+  font-size: 14px;
+  line-height: 1;
+  text-align: center;
+}
+
 .hint {
   margin-left: auto;
   font-size: 11px;
