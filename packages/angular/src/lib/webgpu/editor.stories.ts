@@ -42,7 +42,7 @@ export const MarqueeSelection: Story = {
  * single undo, and **Cmd/Ctrl+Z** / **+Shift+Z** step through the history.
  */
 export const KeyboardEditing: Story = {
-  args: { scene: createVectorScene(), selectable: true },
+  args: { scene: createVectorScene(), selectable: true, keyboardEditing: true },
 };
 
 /**
@@ -51,7 +51,7 @@ export const KeyboardEditing: Story = {
  * boxes. Hold **Cmd/Ctrl** while dragging to move freely (no snap).
  */
 export const SnappingGuides: Story = {
-  args: { scene: createVectorScene(), selectable: true },
+  args: { scene: createVectorScene(), selectable: true, snapping: true },
 };
 
 /**
@@ -61,7 +61,7 @@ export const SnappingGuides: Story = {
  * centres horizontally or vertically). Each is one undo step.
  */
 export const AlignAndDistribute: Story = {
-  args: { scene: createVectorScene(), selectable: true },
+  args: { scene: createVectorScene(), selectable: true, alignTools: true },
 };
 
 /**
@@ -70,7 +70,7 @@ export const AlignAndDistribute: Story = {
  * on-screen position even when the group carries its own transform.
  */
 export const Grouping: Story = {
-  args: { scene: createVectorScene(), selectable: true, showLayers: true },
+  args: { scene: createVectorScene(), selectable: true, grouping: true, showLayers: true },
 };
 
 /**
@@ -80,7 +80,7 @@ export const Grouping: Story = {
  * inside it) as a single undo step, and selects the result.
  */
 export const BooleanOps: Story = {
-  args: { scene: createVectorScene(), selectable: true, showLayers: true },
+  args: { scene: createVectorScene(), selectable: true, booleans: true, showLayers: true },
 };
 
 /**
@@ -89,7 +89,7 @@ export const BooleanOps: Story = {
  * subtrees, so pasting a group re-creates its children with fresh ids.
  */
 export const CopyPaste: Story = {
-  args: { scene: createVectorScene(), selectable: true },
+  args: { scene: createVectorScene(), selectable: true, clipboardKeys: true },
 };
 
 /**
@@ -129,7 +129,7 @@ export const RulersAndGrid: Story = {
  * Each new shape is one undo step.
  */
 export const DrawingTools: Story = {
-  args: { scene: createVectorScene(), selectable: true },
+  args: { scene: createVectorScene(), selectable: true, drawing: true },
 };
 
 /**
@@ -139,7 +139,7 @@ export const DrawingTools: Story = {
  * commit re-shapes the outline as a single undo.
  */
 export const TextEditing: Story = {
-  args: { scene: createTextScene(), selectable: true, showInspector: true },
+  args: { scene: createTextScene(), selectable: true, textEditing: true, showInspector: true },
 };
 
 /**
@@ -159,6 +159,14 @@ export const Everything: Story = {
   args: {
     scene: createVectorScene(),
     selectable: true,
+    snapping: true,
+    drawing: true,
+    alignTools: true,
+    booleans: true,
+    grouping: true,
+    clipboardKeys: true,
+    keyboardEditing: true,
+    textEditing: true,
     exportable: true,
     showLayers: true,
     showInspector: true,

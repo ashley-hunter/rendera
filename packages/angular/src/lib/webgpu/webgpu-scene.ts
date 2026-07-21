@@ -136,8 +136,25 @@ export class WebGpuScene {
 
   /** Optional scene to render; defaults to the shared sample document. */
   readonly scene = input<SceneSource | null>(null);
-  /** Click to select the top-most shape and draw its bounding box (default off). */
+  /** Click / marquee to select + transform handles — the base of every editor
+   *  feature below (default off). */
   readonly selectable = input(false);
+  /** Snap a moved shape's edges/centre to nearby shapes, with guides (default off). */
+  readonly snapping = input(false);
+  /** Show the shape-drawing tools (rectangle / ellipse / pen) in the toolbar. */
+  readonly drawing = input(false);
+  /** Show the align / distribute toolbar for multi-selections. */
+  readonly alignTools = input(false);
+  /** Show the boolean (union/subtract/intersect/exclude) toolbar. */
+  readonly booleans = input(false);
+  /** Group / ungroup: toolbar buttons + Cmd/Ctrl+G / Shift+G. */
+  readonly grouping = input(false);
+  /** Copy / cut / paste with Cmd/Ctrl+C / X / V. */
+  readonly clipboardKeys = input(false);
+  /** Arrow-nudge, Delete, and Cmd/Ctrl+D duplicate shortcuts. */
+  readonly keyboardEditing = input(false);
+  /** Double-click a text node to edit its string inline. */
+  readonly textEditing = input(false);
   /** Show SVG / PNG export buttons in the toolbar (default off). */
   readonly exportable = input(false);
   /** Show the layers panel beside the canvas (default off; implies selectable). */
@@ -581,12 +598,15 @@ export class WebGpuScene {
         uniform: event.shiftKey,
         fromCentre: event.altKey,
       });
-      // A move-drag snaps its translation to nearby shapes' edges/centres, unless
-      // a modifier is held for free movement. Resize/rotate never snap.
-      if (this.dragHandle === 'move' && !(event.ctrlKey || event.metaKey)) {
+      // A move-drag snaps its translation to nearby shapes' edges/centres and/or
+      // the grid, unless a modifier is held for free movement. Resize/rotate
+      // never snap. Shape snapping and grid snapping are independently gated.
+      const wantSnap = this.dragHandle === 'move' && !(event.ctrlKey || event.metaKey) && (this.snapping() || this.gridSize() > 0);
+      if (wantSnap) {
         const res = snapMove(this.document, [...this.dragSnapshot.keys()], this.dragBounds, vec2(delta.e, delta.f), {
           threshold: 6 / this.camera().zoom,
           grid: this.gridSize(),
+          targets: this.snapping() ? undefined : [],
         });
         delta = { a: 1, b: 0, c: 0, d: 1, e: res.delta.x, f: res.delta.y };
         this.snapGuides.set(res.guides);
@@ -780,6 +800,7 @@ export class WebGpuScene {
       this.finishPen(false);
       return;
     }
+    if (!this.textEditing()) return;
     const world = screenToWorld(this.camera(), this.toCanvas(event, canvas));
     const hit = hitTest(this.document, world, { tolerance: 4 / this.camera().zoom });
     if (hit && this.document.get(hit)?.type === 'text') this.startTextEdit(hit);
@@ -1017,7 +1038,7 @@ export class WebGpuScene {
       return;
     }
     // Tool shortcuts (no modifier): V select, R rect, O ellipse, P pen.
-    if (!mod && !event.shiftKey) {
+    if (this.drawing() && !mod && !event.shiftKey) {
       const tools: Record<string, 'select' | 'rect' | 'ellipse' | 'pen'> = { v: 'select', r: 'rect', o: 'ellipse', p: 'pen' };
       const t = tools[key.toLowerCase()];
       if (t) {
@@ -1037,38 +1058,39 @@ export class WebGpuScene {
       this.redo();
       return;
     }
-    if (mod && (key === 'd' || key === 'D')) {
+    if (this.keyboardEditing() && mod && (key === 'd' || key === 'D')) {
       event.preventDefault();
       this.duplicateSelection();
       return;
     }
-    if (mod && (key === 'g' || key === 'G')) {
+    if (this.grouping() && mod && (key === 'g' || key === 'G')) {
       event.preventDefault();
       if (event.shiftKey) this.ungroupSelection();
       else this.groupSelection();
       return;
     }
-    if (mod && (key === 'c' || key === 'C')) {
+    if (this.clipboardKeys() && mod && (key === 'c' || key === 'C')) {
       event.preventDefault();
       this.copySelection();
       return;
     }
-    if (mod && (key === 'x' || key === 'X')) {
+    if (this.clipboardKeys() && mod && (key === 'x' || key === 'X')) {
       event.preventDefault();
       this.copySelection();
       this.deleteSelection();
       return;
     }
-    if (mod && (key === 'v' || key === 'V')) {
+    if (this.clipboardKeys() && mod && (key === 'v' || key === 'V')) {
       event.preventDefault();
       this.pasteClipboard();
       return;
     }
-    if (key === 'Delete' || key === 'Backspace') {
+    if (this.keyboardEditing() && (key === 'Delete' || key === 'Backspace')) {
       event.preventDefault();
       this.deleteSelection();
       return;
     }
+    if (!this.keyboardEditing()) return;
     const nudge: Record<string, Vec2> = {
       ArrowLeft: vec2(-1, 0), ArrowRight: vec2(1, 0), ArrowUp: vec2(0, -1), ArrowDown: vec2(0, 1),
     };
@@ -1112,7 +1134,7 @@ export class WebGpuScene {
   }
 
   /** Group the selection into a new group and select it. One undo entry. */
-  private groupSelection(): void {
+  protected groupSelection(): void {
     const ids = [...this.selection().ids];
     if (ids.length < 2) return;
     const gid = this.history ? this.history.batch(() => groupNodes(this.document, ids)) : groupNodes(this.document, ids);
@@ -1122,7 +1144,7 @@ export class WebGpuScene {
   }
 
   /** Ungroup the selected group(s), selecting the freed children. One undo entry. */
-  private ungroupSelection(): void {
+  protected ungroupSelection(): void {
     const ids = [...this.selection().ids];
     if (!ids.length) return;
     const freed = this.history ? this.history.batch(() => ungroupNodes(this.document, ids)) : ungroupNodes(this.document, ids);
