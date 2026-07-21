@@ -17,6 +17,7 @@ import type { BooleanOp } from './boolean';
 import type { Paint } from './paint';
 import type { LinearRgba } from './render-list';
 import type { FillRule, Path } from './path';
+import type { ShapeSpec } from './shape';
 import type { StrokeCap, StrokeJoin } from './stroke';
 import type { TextAlign, TextDirection } from './text/layout';
 import type { Transform } from './transform';
@@ -229,6 +230,9 @@ export interface PathNode extends SpatialNode {
   fillRule?: FillRule;
   /** An optional outline stroke, painted over the fill. */
   stroke?: Stroke;
+  /** Optional parametric recipe (a "live shape") the editor keeps editable —
+   *  `path` is re-derived from it when its parameters change. */
+  shape?: ShapeSpec;
 }
 
 /**

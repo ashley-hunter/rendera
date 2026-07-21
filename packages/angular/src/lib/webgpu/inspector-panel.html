@@ -40,6 +40,19 @@
           <input type="number" class="control num" [value]="s.y" (change)="setY($any($event.target).value)" />
         </label>
 
+        @if (s.cornerRadius !== null) {
+          <label class="field">
+            <span class="label">Radius</span>
+            <input type="number" min="0" step="1" class="control num" [value]="s.cornerRadius" (change)="setCornerRadius($any($event.target).value)" />
+          </label>
+        }
+        @if (s.sides !== null) {
+          <label class="field">
+            <span class="label">Sides</span>
+            <input type="number" min="3" step="1" class="control num" [value]="s.sides" (change)="setSides($any($event.target).value)" />
+          </label>
+        }
+
         @if (s.fillHex !== null) {
           <label class="field">
             <span class="label">Fill</span>

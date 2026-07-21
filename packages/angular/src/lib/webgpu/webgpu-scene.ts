@@ -23,6 +23,7 @@ import {
   ellipseShape,
   isDrawnBigEnough,
   pasteNodes,
+  polygonShape,
   polylineShape,
   rectShape,
   EMPTY_SELECTION,
@@ -90,6 +91,12 @@ import { InspectorPanel } from './inspector-panel';
 import { LayersPanel, type LayerReorder } from './layers-panel';
 
 type Status = 'pending' | 'ready' | 'unsupported';
+
+/** The active editor tool: pointer selection or one of the shape-drawing tools. */
+type EditorTool = 'select' | 'rect' | 'ellipse' | 'polygon' | 'pen';
+
+/** Default vertex count for a freshly drawn polygon. */
+const DEFAULT_POLY_SIDES = 5;
 
 /** A linear-light clear colour. */
 interface ClearColor {
@@ -214,11 +221,11 @@ export class WebGpuScene {
   private clipboard: Clipboard | null = null;
 
   /** The active tool: pointer selection, or one of the shape-drawing tools. */
-  protected readonly tool = signal<'select' | 'rect' | 'ellipse' | 'pen'>('select');
+  protected readonly tool = signal<EditorTool>('select');
   /** Rect/ellipse draw start in world space (null when not dragging out a shape). */
   private drawStart: Vec2 | null = null;
   /** Live draw preview in CSS px for the overlay (rect/ellipse), or null. */
-  protected readonly drawPreview = signal<{ kind: 'rect' | 'ellipse'; x: number; y: number; w: number; h: number } | null>(null);
+  protected readonly drawPreview = signal<{ kind: 'rect' | 'ellipse' | 'polygon'; x: number; y: number; w: number; h: number; poly?: string } | null>(null);
   /** Pen tool: committed points (world) and the live cursor for the rubber-band. */
   private readonly penPoints = signal<Vec2[]>([]);
   private readonly penCursor = signal<Vec2 | null>(null);
@@ -838,7 +845,7 @@ export class WebGpuScene {
   private static readonly PEN_STROKE = { paint: { type: 'solid' as const, color: { r: 0.9, g: 0.9, b: 0.95, a: 1 } }, width: 2 };
 
   /** Select a tool; leaving the pen mid-path finishes it (open). */
-  protected setTool(tool: 'select' | 'rect' | 'ellipse' | 'pen'): void {
+  protected setTool(tool: EditorTool): void {
     if (this.tool() === 'pen' && tool !== 'pen') this.finishPen(false);
     this.tool.set(tool);
     if (tool === 'select') this.cancelDraw();
@@ -869,10 +876,23 @@ export class WebGpuScene {
     }
     if (!this.drawStart) return;
     const a = worldToScreen(this.camera(), this.drawStart);
-    this.drawPreview.set({
-      kind: this.tool() === 'ellipse' ? 'ellipse' : 'rect',
-      x: Math.min(a.x, pt.x), y: Math.min(a.y, pt.y), w: Math.abs(pt.x - a.x), h: Math.abs(pt.y - a.y),
-    });
+    const x = Math.min(a.x, pt.x);
+    const y = Math.min(a.y, pt.y);
+    const w = Math.abs(pt.x - a.x);
+    const h = Math.abs(pt.y - a.y);
+    const kind = this.tool() === 'ellipse' ? 'ellipse' : this.tool() === 'polygon' ? 'polygon' : 'rect';
+    // A polygon preview draws the actual N-gon outline in screen px.
+    let poly: string | undefined;
+    if (kind === 'polygon') {
+      const cx = x + w / 2;
+      const cy = y + h / 2;
+      const r = Math.min(w, h) / 2;
+      poly = Array.from({ length: DEFAULT_POLY_SIDES }, (_v, i) => {
+        const ang = -Math.PI / 2 + (i / DEFAULT_POLY_SIDES) * Math.PI * 2;
+        return `${cx + r * Math.cos(ang)},${cy + r * Math.sin(ang)}`;
+      }).join(' ');
+    }
+    this.drawPreview.set({ kind, x, y, w, h, poly });
   }
 
   private onDrawPointerUp(pt: Vec2): void {
@@ -882,7 +902,10 @@ export class WebGpuScene {
     this.drawStart = null;
     this.drawPreview.set(null);
     if (!isDrawnBigEnough(a, b, 3 / this.camera().zoom)) return; // ignore a stray click
-    const input = this.tool() === 'ellipse' ? ellipseShape(a, b) : rectShape(a, b);
+    const input =
+      this.tool() === 'ellipse' ? ellipseShape(a, b)
+      : this.tool() === 'polygon' ? polygonShape(a, b, DEFAULT_POLY_SIDES)
+      : rectShape(a, b);
     const created = this.history ? this.history.batch(() => this.document.insert(input)) : this.document.insert(input);
     this.selection.set(createSelection([created.id]));
     this.tool.set('select'); // one-shot: back to selecting the new shape

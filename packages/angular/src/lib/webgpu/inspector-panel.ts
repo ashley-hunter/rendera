@@ -9,18 +9,23 @@ import {
   BLEND_MODES,
   hexToLinear,
   linearToHex,
+  shapeToPath,
+  withRadius,
+  withSides,
   type BlendMode,
   type NodeId,
   type Paint,
   type SceneDocument,
   type Selection,
+  type ShapeSpec,
   type SpatialNode,
 } from '@rendera/core';
 
-/** A node that may carry a `fill` and/or `stroke` (path / text / layer / boolean). */
+/** A node that may carry a `fill`, `stroke`, and/or a live-shape recipe. */
 interface Painted extends SpatialNode {
   fill?: Paint;
   stroke?: { paint: Paint; width: number };
+  shape?: ShapeSpec;
 }
 
 /** The resolved view-model the template renders (null when nothing is selected). */
@@ -37,6 +42,10 @@ interface InspectorModel {
     readonly strokeWidth: number | null;
     readonly x: number;
     readonly y: number;
+    /** A live rectangle's corner radius, or null. */
+    readonly cornerRadius: number | null;
+    /** A live polygon's side count, or null. */
+    readonly sides: number | null;
   } | null;
 }
 
@@ -78,6 +87,7 @@ export class InspectorPanel {
     const primaryId = sel.primary ?? ids[ids.length - 1];
     const primary = this.document().get(primaryId) as Painted | undefined;
     if (!primary) return null;
+    const shape = primary.shape;
     const single = ids.length === 1 && 'transform' in primary
       ? {
           type: primary.type,
@@ -86,6 +96,8 @@ export class InspectorPanel {
           strokeWidth: primary.stroke ? primary.stroke.width : null,
           x: round(primary.transform.translation.x),
           y: round(primary.transform.translation.y),
+          cornerRadius: shape?.kind === 'rect' ? round(shape.radius) : null,
+          sides: shape?.kind === 'polygon' ? shape.sides : null,
         }
       : null;
     return {
@@ -158,6 +170,24 @@ export class InspectorPanel {
     const node = this.document().get(id) as Painted | undefined;
     if (!node?.stroke) return;
     this.updatePrimary({ stroke: { ...node.stroke, width: Math.max(0, Number(value)) } });
+  }
+
+  /** Change a live rectangle's corner radius, re-deriving its path. */
+  protected setCornerRadius(value: string): void {
+    const id = this.primaryId();
+    const node = id ? (this.document().get(id) as Painted | undefined) : undefined;
+    if (!id || node?.shape?.kind !== 'rect') return;
+    const spec = withRadius(node.shape, Number(value));
+    this.updatePrimary({ shape: spec, path: shapeToPath(spec) });
+  }
+
+  /** Change a live polygon's side count, re-deriving its path. */
+  protected setSides(value: string): void {
+    const id = this.primaryId();
+    const node = id ? (this.document().get(id) as Painted | undefined) : undefined;
+    if (!id || node?.shape?.kind !== 'polygon') return;
+    const spec = withSides(node.shape, Number(value));
+    this.updatePrimary({ shape: spec, path: shapeToPath(spec) });
   }
 
   protected setX(value: string): void {

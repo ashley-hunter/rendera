@@ -11,7 +11,8 @@
  */
 
 import type { Fill, NodeInput, PathNode, Stroke } from './node';
-import { ellipsePath, type FillRule, type Path, polygonPath, rectPath } from './path';
+import { ellipsePath, type FillRule, type Path, polygonPath } from './path';
+import { shapeToPath, type ShapeSpec } from './shape';
 import { vec2, type Vec2 } from './vec2';
 
 /** Paint/stroke to apply to a drawn shape. */
@@ -33,7 +34,7 @@ function box(a: Vec2, b: Vec2): { min: Vec2; w: number; h: number } {
   return { min: vec2(Math.min(a.x, b.x), Math.min(a.y, b.y)), w: Math.abs(b.x - a.x), h: Math.abs(b.y - a.y) };
 }
 
-function pathNode(name: string, translation: Vec2, path: Path, style: ShapeStyle | undefined): NodeInput<PathNode> {
+function pathNode(name: string, translation: Vec2, path: Path, style: ShapeStyle | undefined, shape?: ShapeSpec): NodeInput<PathNode> {
   const hasPaint = style?.fill || style?.stroke;
   return {
     type: 'path',
@@ -42,20 +43,29 @@ function pathNode(name: string, translation: Vec2, path: Path, style: ShapeStyle
     fill: style?.fill ?? (hasPaint ? undefined : DEFAULT_FILL),
     ...(style?.stroke ? { stroke: style.stroke } : {}),
     ...(style?.fillRule ? { fillRule: style.fillRule } : {}),
+    ...(shape ? { shape } : {}),
     ...at(translation),
   };
 }
 
-/** A rectangle spanning the two drag corners `a`–`b`. */
+/** A rectangle spanning the two drag corners `a`–`b` (a live shape with radius 0). */
 export function rectShape(a: Vec2, b: Vec2, style?: ShapeStyle): NodeInput<PathNode> {
   const { min, w, h } = box(a, b);
-  return pathNode('Rectangle', min, rectPath(0, 0, w, h), style);
+  const spec: ShapeSpec = { kind: 'rect', width: w, height: h, radius: 0 };
+  return pathNode('Rectangle', min, shapeToPath(spec), style, spec);
 }
 
 /** An ellipse inscribed in the box spanned by `a`–`b`. */
 export function ellipseShape(a: Vec2, b: Vec2, style?: ShapeStyle): NodeInput<PathNode> {
   const { min, w, h } = box(a, b);
   return pathNode('Ellipse', min, ellipsePath(w / 2, h / 2, w / 2, h / 2), style);
+}
+
+/** A regular polygon inscribed in the box spanned by `a`–`b` (a live shape). */
+export function polygonShape(a: Vec2, b: Vec2, sides = 5, style?: ShapeStyle): NodeInput<PathNode> {
+  const { min, w, h } = box(a, b);
+  const spec: ShapeSpec = { kind: 'polygon', cx: w / 2, cy: h / 2, radius: Math.min(w, h) / 2, sides: Math.max(3, Math.round(sides)), rotation: 0 };
+  return pathNode('Polygon', min, shapeToPath(spec), style, spec);
 }
 
 /**

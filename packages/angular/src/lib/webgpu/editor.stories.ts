@@ -122,14 +122,25 @@ export const RulersAndGrid: Story = {
 };
 
 /**
- * **Drawing tools.** Use the toolbar (or shortcuts): **Rectangle (R)** and
- * **Ellipse (O)** drag out with a live preview; **Pen (P)** lays down points with
- * a rubber-band — click the first point to close into a filled polygon, or
- * double-click to finish an open stroked path. **V** / **Esc** returns to Select.
- * Each new shape is one undo step.
+ * **Drawing tools.** Use the toolbar (or shortcuts): **Rectangle (R)**,
+ * **Ellipse (O)**, and **Polygon** drag out with a live preview; **Pen (P)** lays
+ * down points with a rubber-band — click the first point to close into a filled
+ * polygon, or double-click to finish an open stroked path. **V** / **Esc**
+ * returns to Select. Each new shape is one undo step.
  */
 export const DrawingTools: Story = {
   args: { scene: createVectorScene(), selectable: true, drawing: true },
+};
+
+/**
+ * **Live-shape controls.** Draw a **Rectangle** or **Polygon**, then edit it as a
+ * parametric "live shape" in the inspector: a rectangle gains a **Radius** field
+ * (round its corners) and a polygon a **Sides** field (change its vertex count) —
+ * the geometry re-derives from the recipe on each change, as one undo. Existing
+ * shapes stay plain paths until you draw new ones.
+ */
+export const ShapeControls: Story = {
+  args: { scene: createVectorScene(), selectable: true, drawing: true, showInspector: true },
 };
 
 /**

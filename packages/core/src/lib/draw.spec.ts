@@ -1,5 +1,5 @@
 import { SceneDocument } from './document';
-import { ellipseShape, isDrawnBigEnough, polylineShape, rectShape } from './draw';
+import { ellipseShape, isDrawnBigEnough, polygonShape, polylineShape, rectShape } from './draw';
 import { createSequentialIdFactory } from './id';
 import type { PathNode } from './node';
 import { vec2 } from './vec2';
@@ -17,6 +17,22 @@ describe('rectShape', () => {
     const n = d.insert<PathNode>(input);
     expect(d.getWorldBounds(n.id)).toEqual({ minX: 20, minY: 30, maxX: 120, maxY: 90 });
     expect((n.fill as { type: string }).type).toBe('solid'); // default paint
+  });
+
+  it('carries a live rect shape recipe (for corner-radius editing)', () => {
+    const input = rectShape(vec2(0, 0), vec2(40, 30));
+    expect(input.shape).toEqual({ kind: 'rect', width: 40, height: 30, radius: 0 });
+  });
+});
+
+describe('polygonShape', () => {
+  it('inscribes a regular polygon in the drag box with a live recipe', () => {
+    const input = polygonShape(vec2(0, 0), vec2(100, 80), 5);
+    expect(input.shape).toEqual({ kind: 'polygon', cx: 50, cy: 40, radius: 40, sides: 5, rotation: 0 });
+    const d = doc();
+    const n = d.insert<PathNode>(input);
+    // 5 vertices → start + 4 line segments, closed.
+    expect(n.path.subpaths[0].segments).toHaveLength(4);
   });
 });
 

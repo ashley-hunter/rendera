@@ -6,6 +6,7 @@
         <button type="button" class="icon" [class.active]="tool() === 'select'" (click)="setTool('select')" title="Select (V)">⤢</button>
         <button type="button" class="icon" [class.active]="tool() === 'rect'" (click)="setTool('rect')" title="Rectangle (R)">▭</button>
         <button type="button" class="icon" [class.active]="tool() === 'ellipse'" (click)="setTool('ellipse')" title="Ellipse (O)">◯</button>
+        <button type="button" class="icon" [class.active]="tool() === 'polygon'" (click)="setTool('polygon')" title="Polygon">⬠</button>
         <button type="button" class="icon" [class.active]="tool() === 'pen'" (click)="setTool('pen')" title="Pen (P)">✎</button>
       </span>
       <span class="divider"></span>
@@ -116,8 +117,10 @@
         @if (drawPreview(); as p) {
           @if (p.kind === 'rect') {
             <rect class="draw-preview" [attr.x]="p.x" [attr.y]="p.y" [attr.width]="p.w" [attr.height]="p.h" />
-          } @else {
+          } @else if (p.kind === 'ellipse') {
             <ellipse class="draw-preview" [attr.cx]="p.x + p.w / 2" [attr.cy]="p.y + p.h / 2" [attr.rx]="p.w / 2" [attr.ry]="p.h / 2" />
+          } @else {
+            <polygon class="draw-preview" [attr.points]="p.poly" />
           }
         }
         @if (penOverlay(); as pen) {
