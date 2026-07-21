@@ -47,6 +47,13 @@ express them as a **non-destructive `boolean` node**.
   Heavily-degenerate cases — coincident/overlapping edges, exact tangencies,
   self-intersecting operands — are a known limitation; endpoint matching uses a
   small merge tolerance.
+- The flatness/merge tolerances are **absolute** (path units), tuned for
+  ~1000-unit coordinates, so `booleanPath` **normalizes both operands to that
+  working scale and maps the result back** (as `resolveOverlaps` does). Without
+  it, em-scaled operands merge or miss nearby intersections — two overlapping
+  circles ~0.4 units wide lose their overlap entirely — and very large ones
+  under-subdivide. A scale-invariance test asserts the same two circles classify
+  identically whether they are 0.4 units wide or 200,000.
 - Resolution runs in `buildRenderList` (pure). For complex operands this is
   non-trivial per frame; a content-keyed cache is a deferred optimization.
 - Deferred: robust degenerate handling, boolean of open paths / strokes,

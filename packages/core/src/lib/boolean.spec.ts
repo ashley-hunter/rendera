@@ -84,3 +84,31 @@ describe('booleanPath (disjoint / contained)', () => {
     expect(inside(i, 100, 0)).toBe(false);
   });
 });
+
+describe('booleanPath is scale-invariant', () => {
+  // The intersection/merge tolerances are absolute, tuned for ~1000-unit coords;
+  // booleanPath normalizes to that scale internally. Without it, tiny (em-scaled)
+  // operands merge/miss intersections and huge ones under-subdivide. The same two
+  // overlapping circles must give the same result whether they're 0.4 units wide
+  // or 200,000 — checked at the scaled-corresponding sample points.
+  for (const s of [0.0008, 1, 5000]) {
+    it(`classifies overlap/difference correctly at scale ${s}`, () => {
+      const a = ellipsePath(0, 0, 10 * s, 10 * s);
+      const b = ellipsePath(8 * s, 0, 10 * s, 10 * s);
+
+      const i = booleanPath(a, b, 'intersect');
+      expect(inside(i, 4 * s, 0)).toBe(true); // the overlap lens
+      expect(inside(i, -8 * s, 0)).toBe(false); // A only
+      expect(inside(i, 16 * s, 0)).toBe(false); // B only
+
+      const d = booleanPath(a, b, 'difference');
+      expect(inside(d, -8 * s, 0)).toBe(true); // A minus the overlap
+      expect(inside(d, 4 * s, 0)).toBe(false); // overlap removed
+
+      const u = booleanPath(a, b, 'union');
+      expect(inside(u, -8 * s, 0)).toBe(true);
+      expect(inside(u, 16 * s, 0)).toBe(true);
+      expect(inside(u, 0, 40 * s)).toBe(false); // outside both
+    });
+  }
+});

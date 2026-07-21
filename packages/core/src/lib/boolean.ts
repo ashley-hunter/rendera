@@ -210,8 +210,32 @@ function pieceMid(c: Cubic): Vec2 {
 /**
  * The boolean `op` of paths `a` and `b`, as a new path with exact curves.
  * Operands are treated as closed, non-zero-filled regions.
+ *
+ * The intersection/merge tolerances are absolute (path units), tuned for
+ * ~1000-unit coordinates, so both operands are first normalized to that working
+ * scale and the result mapped back — otherwise em-scaled shapes (~40 units) miss
+ * or merge intersections and a very large one under-subdivides. This mirrors the
+ * normalization `resolveOverlaps` already applies (the tolerances are shared).
  */
 export function booleanPath(a: Path, b: Path, op: BooleanOp): Path {
+  const ba = pathBoundsLocal(a);
+  const bb = pathBoundsLocal(b);
+  if (!ba || !bb) return booleanCore(a, b, op); // an empty operand: handled by core
+  const minX = Math.min(ba.minX, bb.minX);
+  const minY = Math.min(ba.minY, bb.minY);
+  const maxX = Math.max(ba.maxX, bb.maxX);
+  const maxY = Math.max(ba.maxY, bb.maxY);
+  const diag = Math.hypot(maxX - minX, maxY - minY);
+  if (diag < 1e-9) return booleanCore(a, b, op);
+  const k = 1000 / diag;
+  if (Math.abs(k - 1) < 0.05) return booleanCore(a, b, op);
+  const scale = { a: k, b: 0, c: 0, d: k, e: 0, f: 0 };
+  const out = booleanCore(transformPath(a, scale), transformPath(b, scale), op);
+  return transformPath(out, { a: 1 / k, b: 0, c: 0, d: 1 / k, e: 0, f: 0 });
+}
+
+/** The boolean core at native scale (see `booleanPath` for normalization). */
+function booleanCore(a: Path, b: Path, op: BooleanOp): Path {
   const ca = pathToContours(a);
   const cb = pathToContours(b);
   if (ca.length === 0) return op === 'intersect' ? { subpaths: [] } : b;
