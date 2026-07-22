@@ -123,10 +123,12 @@ export const RulersAndGrid: Story = {
 
 /**
  * **Drawing tools.** Use the toolbar (or shortcuts): **Rectangle (R)**,
- * **Ellipse (O)**, and **Polygon** drag out with a live preview; **Pen (P)** lays
- * down points with a rubber-band — click the first point to close into a filled
- * polygon, or double-click to finish an open stroked path. **V** / **Esc**
- * returns to Select. Each new shape is one undo step.
+ * **Ellipse (O)**, and **Polygon** drag out with a live preview; **Pen (P)**
+ * draws Bézier paths — **click** for a corner point, or **click-drag** to pull
+ * out smooth curve handles. Click the first point to close into a filled region,
+ * or double-click to finish an open stroked path. **V** / **Esc** returns to
+ * Select. Each new shape is one undo step, and its points stay editable
+ * afterwards (see Path point editing).
  */
 export const DrawingTools: Story = {
   args: { scene: createVectorScene(), selectable: true, drawing: true },

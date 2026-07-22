@@ -11,6 +11,7 @@ import {
 import {
   alignNodes,
   applyTransform,
+  bezierShape,
   buildRenderList,
   clipboardHasContent,
   copyNodes,
@@ -24,7 +25,6 @@ import {
   isDrawnBigEnough,
   pasteNodes,
   polygonShape,
-  polylineShape,
   rectShape,
   EMPTY_SELECTION,
   exportSvg,
@@ -47,6 +47,8 @@ import {
   panBy,
   pathHandleLines,
   pathPoints,
+  pathToData,
+  penPath,
   pruneSelection,
   RenderaFont,
   resolveSelectionClick,
@@ -76,6 +78,7 @@ import {
   type Path,
   type PathNode,
   type PathPointRef,
+  type PenNode,
   type SceneDocument,
   type Selection,
   type SnapGuide,
@@ -226,9 +229,11 @@ export class WebGpuScene {
   private drawStart: Vec2 | null = null;
   /** Live draw preview in CSS px for the overlay (rect/ellipse), or null. */
   protected readonly drawPreview = signal<{ kind: 'rect' | 'ellipse' | 'polygon'; x: number; y: number; w: number; h: number; poly?: string } | null>(null);
-  /** Pen tool: committed points (world) and the live cursor for the rubber-band. */
-  private readonly penPoints = signal<Vec2[]>([]);
+  /** Pen tool: committed Bézier nodes (world), the live cursor, and whether the
+   *  current node is being dragged out into a smooth (curved) point. */
+  private readonly penNodes = signal<PenNode[]>([]);
   private readonly penCursor = signal<Vec2 | null>(null);
+  private penDragging = false;
 
   /** Inline text-edit overlay state (null when not editing a text node). */
   protected readonly textEdit = signal<{
@@ -369,17 +374,30 @@ export class WebGpuScene {
     return { xs, ys, w, h };
   });
 
-  /** Pen-tool preview: the committed points (screen px), a polyline, and the
-   *  rubber-band segment to the cursor. Null when the pen isn't mid-path. */
+  /** Pen-tool preview: the Bézier path so far (screen `d`, including a live
+   *  segment to the cursor), anchor squares, and control dots + handle lines.
+   *  Null when the pen isn't mid-path. */
   protected readonly penOverlay = computed(() => {
-    const pts = this.penPoints();
-    if (this.tool() !== 'pen' || pts.length === 0) return null;
+    const nodes = this.penNodes();
+    if (this.tool() !== 'pen' || nodes.length === 0) return null;
     const cam = this.camera();
-    const dots = pts.map((p) => worldToScreen(cam, p));
-    const poly = dots.map((d) => `${d.x},${d.y}`).join(' ');
+    const s = (p: Vec2) => worldToScreen(cam, p);
+    const proj = (n: PenNode): PenNode => ({
+      point: s(n.point),
+      handleIn: n.handleIn ? s(n.handleIn) : undefined,
+      handleOut: n.handleOut ? s(n.handleOut) : undefined,
+    });
+    const projected = nodes.map(proj);
     const cursor = this.penCursor();
-    const rubber = cursor ? { from: dots[dots.length - 1], to: worldToScreen(cam, cursor) } : null;
-    return { dots, poly, rubber };
+    const preview = cursor ? [...projected, { point: s(cursor) }] : projected;
+    const d = preview.length >= 2 ? pathToData(penPath(preview, false)) : '';
+    const handles: { a: Vec2; b: Vec2 }[] = [];
+    const controls: Vec2[] = [];
+    for (const p of projected) {
+      if (p.handleOut) { handles.push({ a: p.point, b: p.handleOut }); controls.push(p.handleOut); }
+      if (p.handleIn) { handles.push({ a: p.point, b: p.handleIn }); controls.push(p.handleIn); }
+    }
+    return { d, anchors: projected.map((p) => p.point), handles, controls };
   });
 
   private document: SceneDocument = createSampleDocument();
@@ -854,24 +872,36 @@ export class WebGpuScene {
   private onDrawPointerDown(pt: Vec2): void {
     const world = screenToWorld(this.camera(), pt);
     if (this.tool() === 'pen') {
-      const pts = this.penPoints();
-      // Click near the first point → close the polygon.
-      if (pts.length >= 2) {
-        const first = worldToScreen(this.camera(), pts[0]);
+      const nodes = this.penNodes();
+      // Click near the first node → close the path.
+      if (nodes.length >= 2) {
+        const first = worldToScreen(this.camera(), nodes[0].point);
         if ((first.x - pt.x) ** 2 + (first.y - pt.y) ** 2 <= 100) {
           this.finishPen(true);
           return;
         }
       }
-      this.penPoints.set([...pts, world]);
+      // Drop a new anchor; a subsequent drag (before release) pulls out its
+      // symmetric control handles, turning it into a smooth (curved) point.
+      this.penNodes.set([...nodes, { point: world }]);
+      this.penDragging = true;
       return;
     }
-    this.drawStart = world; // rect / ellipse: start a drag
+    this.drawStart = world; // rect / ellipse / polygon: start a drag
   }
 
   private onDrawPointerMove(pt: Vec2): void {
     if (this.tool() === 'pen') {
-      if (this.penPoints().length) this.penCursor.set(screenToWorld(this.camera(), pt));
+      const world = screenToWorld(this.camera(), pt);
+      this.penCursor.set(world);
+      if (this.penDragging) {
+        const nodes = [...this.penNodes()];
+        const i = nodes.length - 1;
+        const a = nodes[i].point;
+        // handleOut = cursor; handleIn = its mirror across the anchor (smooth).
+        nodes[i] = { point: a, handleOut: world, handleIn: vec2(2 * a.x - world.x, 2 * a.y - world.y) };
+        this.penNodes.set(nodes);
+      }
       return;
     }
     if (!this.drawStart) return;
@@ -896,7 +926,11 @@ export class WebGpuScene {
   }
 
   private onDrawPointerUp(pt: Vec2): void {
-    if (this.tool() === 'pen' || !this.drawStart) return; // pen commits on click
+    if (this.tool() === 'pen') {
+      this.penDragging = false; // the smooth-handle drag (if any) ends
+      return;
+    }
+    if (!this.drawStart) return;
     const a = this.drawStart;
     const b = screenToWorld(this.camera(), pt);
     this.drawStart = null;
@@ -913,13 +947,14 @@ export class WebGpuScene {
     this.draw();
   }
 
-  /** Finish the pen path: closed → filled polygon, open → stroked path. */
+  /** Finish the pen path: closed → filled region, open → stroked Bézier path. */
   private finishPen(closed: boolean): void {
-    const pts = this.penPoints();
-    this.penPoints.set([]);
+    const nodes = this.penNodes();
+    this.penNodes.set([]);
     this.penCursor.set(null);
-    if (pts.length >= 2) {
-      const input = closed ? polylineShape(pts, true) : polylineShape(pts, false, { stroke: WebGpuScene.PEN_STROKE });
+    this.penDragging = false;
+    if (nodes.length >= 2) {
+      const input = closed ? bezierShape(nodes, true) : bezierShape(nodes, false, { stroke: WebGpuScene.PEN_STROKE });
       const created = this.history ? this.history.batch(() => this.document.insert(input)) : this.document.insert(input);
       this.selection.set(createSelection([created.id]));
       this.rev.update((v) => v + 1);
@@ -932,8 +967,9 @@ export class WebGpuScene {
   private cancelDraw(): void {
     this.drawStart = null;
     this.drawPreview.set(null);
-    this.penPoints.set([]);
+    this.penNodes.set([]);
     this.penCursor.set(null);
+    this.penDragging = false;
   }
 
   // --- inline text editing -------------------------------------------------

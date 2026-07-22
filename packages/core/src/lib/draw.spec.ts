@@ -1,5 +1,5 @@
+import { bezierShape, ellipseShape, isDrawnBigEnough, penPath, polygonShape, polylineShape, rectShape } from './draw';
 import { SceneDocument } from './document';
-import { ellipseShape, isDrawnBigEnough, polygonShape, polylineShape, rectShape } from './draw';
 import { createSequentialIdFactory } from './id';
 import type { PathNode } from './node';
 import { vec2 } from './vec2';
@@ -73,5 +73,46 @@ describe('isDrawnBigEnough', () => {
   it('rejects a stray click and accepts a real drag', () => {
     expect(isDrawnBigEnough(vec2(0, 0), vec2(1, 1))).toBe(false);
     expect(isDrawnBigEnough(vec2(0, 0), vec2(10, 10))).toBe(true);
+  });
+});
+
+describe('penPath', () => {
+  it('makes line segments between handle-less nodes', () => {
+    const path = penPath([{ point: vec2(0, 0) }, { point: vec2(10, 0) }, { point: vec2(10, 10) }], false);
+    const sub = path.subpaths[0];
+    expect(sub.segments.map((s) => s.type)).toEqual(['line', 'line']);
+    expect(sub.closed).toBe(false);
+  });
+
+  it('makes a cubic when either endpoint has a handle facing the segment', () => {
+    const path = penPath([{ point: vec2(0, 0), handleOut: vec2(5, -8) }, { point: vec2(20, 0), handleIn: vec2(15, -8) }], false);
+    const seg = path.subpaths[0].segments[0];
+    expect(seg).toEqual({ type: 'cubic', c1: { x: 5, y: -8 }, c2: { x: 15, y: -8 }, to: { x: 20, y: 0 } });
+  });
+
+  it('adds the wrap-around segment when closed', () => {
+    const path = penPath([{ point: vec2(0, 0) }, { point: vec2(10, 0) }, { point: vec2(5, 10) }], true);
+    expect(path.subpaths[0].segments).toHaveLength(3); // 2 between + 1 closing
+    expect(path.subpaths[0].closed).toBe(true);
+  });
+
+  it('degenerates gracefully for 0 or 1 nodes', () => {
+    expect(penPath([], false).subpaths).toEqual([]);
+    expect(penPath([{ point: vec2(3, 4) }], false).subpaths[0]).toEqual({ start: { x: 3, y: 4 }, closed: false, segments: [] });
+  });
+});
+
+describe('bezierShape', () => {
+  it('localizes nodes + handles relative to the first point', () => {
+    const input = bezierShape(
+      [{ point: vec2(10, 10), handleOut: vec2(20, 5) }, { point: vec2(50, 10), handleIn: vec2(40, 5) }],
+      false,
+      { stroke: { paint: { type: 'solid', color: { r: 0, g: 0, b: 0, a: 1 } }, width: 2 } }
+    );
+    expect(input.transform!.translation).toEqual({ x: 10, y: 10 });
+    const seg = input.path.subpaths[0].segments[0];
+    // Points shifted by (−10,−10): start (0,0), c1 (10,-5), c2 (30,-5), to (40,0).
+    expect(seg).toEqual({ type: 'cubic', c1: { x: 10, y: -5 }, c2: { x: 30, y: -5 }, to: { x: 40, y: 0 } });
+    expect(input.fill).toBeUndefined(); // stroke-only
   });
 });

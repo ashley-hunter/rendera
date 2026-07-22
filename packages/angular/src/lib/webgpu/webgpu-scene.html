@@ -124,12 +124,17 @@
           }
         }
         @if (penOverlay(); as pen) {
-          @if (pen.rubber; as rb) {
-            <line class="pen-rubber" [attr.x1]="rb.from.x" [attr.y1]="rb.from.y" [attr.x2]="rb.to.x" [attr.y2]="rb.to.y" />
+          @if (pen.d) {
+            <path class="pen-line" [attr.d]="pen.d" />
           }
-          <polyline class="pen-line" [attr.points]="pen.poly" />
-          @for (d of pen.dots; track $index) {
-            <circle class="pen-dot" [attr.cx]="d.x" [attr.cy]="d.y" r="3.5" />
+          @for (h of pen.handles; track $index) {
+            <line class="path-handle" [attr.x1]="h.a.x" [attr.y1]="h.a.y" [attr.x2]="h.b.x" [attr.y2]="h.b.y" />
+          }
+          @for (a of pen.anchors; track $index) {
+            <rect class="pen-dot" [attr.x]="a.x - 3.5" [attr.y]="a.y - 3.5" width="7" height="7" />
+          }
+          @for (c of pen.controls; track $index) {
+            <circle class="path-control" [attr.cx]="c.x" [attr.cy]="c.y" r="4" />
           }
         }
         @if (pathOverlay(); as pe) {

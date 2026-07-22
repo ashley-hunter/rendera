@@ -11,7 +11,7 @@
  */
 
 import type { Fill, NodeInput, PathNode, Stroke } from './node';
-import { ellipsePath, type FillRule, type Path, polygonPath } from './path';
+import { ellipsePath, type FillRule, type Path, type PathSegment, polygonPath } from './path';
 import { shapeToPath, type ShapeSpec } from './shape';
 import { vec2, type Vec2 } from './vec2';
 
@@ -86,4 +86,52 @@ export function polylineShape(points: readonly Vec2[], closed: boolean, style?: 
 export function isDrawnBigEnough(a: Vec2, b: Vec2, min = 2): boolean {
   const { w, h } = box(a, b);
   return w >= min && h >= min;
+}
+
+/**
+ * A pen node: an on-curve `point` with optional off-curve Bézier control handles.
+ * A node with no handles makes straight (line) segments into/out of it; a node
+ * with handles makes smooth cubic curves. Handles are absolute positions.
+ */
+export interface PenNode {
+  readonly point: Vec2;
+  /** Incoming control handle (for the segment ending at this node). */
+  readonly handleIn?: Vec2;
+  /** Outgoing control handle (for the segment starting at this node). */
+  readonly handleOut?: Vec2;
+}
+
+/**
+ * Build a path from pen nodes. Each segment is a cubic when either endpoint has a
+ * handle facing it (missing handles default to the anchor, giving a partial
+ * curve), else a straight line. `closed` adds the wrap-around segment and closes
+ * the subpath.
+ */
+export function penPath(nodes: readonly PenNode[], closed: boolean): Path {
+  if (nodes.length === 0) return { subpaths: [] };
+  if (nodes.length === 1) return { subpaths: [{ start: nodes[0].point, closed: false, segments: [] }] };
+  const seg = (a: PenNode, b: PenNode): PathSegment =>
+    a.handleOut || b.handleIn
+      ? { type: 'cubic', c1: a.handleOut ?? a.point, c2: b.handleIn ?? b.point, to: b.point }
+      : { type: 'line', to: b.point };
+  const segments: PathSegment[] = [];
+  for (let i = 1; i < nodes.length; i++) segments.push(seg(nodes[i - 1], nodes[i]));
+  if (closed) segments.push(seg(nodes[nodes.length - 1], nodes[0]));
+  return { subpaths: [{ start: nodes[0].point, closed, segments }] };
+}
+
+/**
+ * A freeform Bézier path from pen nodes (world space). `closed` fills it as a
+ * region, open strokes it. Nodes are stored relative to the first node, which
+ * becomes the node's local origin.
+ */
+export function bezierShape(nodes: readonly PenNode[], closed: boolean, style?: ShapeStyle): NodeInput<PathNode> {
+  const origin = nodes[0].point;
+  const rel = (p: Vec2): Vec2 => vec2(p.x - origin.x, p.y - origin.y);
+  const local: PenNode[] = nodes.map((n) => ({
+    point: rel(n.point),
+    handleIn: n.handleIn ? rel(n.handleIn) : undefined,
+    handleOut: n.handleOut ? rel(n.handleOut) : undefined,
+  }));
+  return pathNode(closed ? 'Curve' : 'Path', origin, penPath(local, closed), style);
 }
