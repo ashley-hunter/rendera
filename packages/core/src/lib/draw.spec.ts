@@ -23,6 +23,13 @@ describe('rectShape', () => {
     const input = rectShape(vec2(0, 0), vec2(40, 30));
     expect(input.shape).toEqual({ kind: 'rect', width: 40, height: 30, radius: 0 });
   });
+
+  it('round-trips its live-shape recipe through JSON (save/load)', () => {
+    const d = doc();
+    const n = d.insert<PathNode>(rectShape(vec2(0, 0), vec2(40, 30)));
+    const restored = SceneDocument.fromJSON(JSON.parse(JSON.stringify(d.toJSON())));
+    expect((restored.get(n.id) as PathNode).shape).toEqual({ kind: 'rect', width: 40, height: 30, radius: 0 });
+  });
 });
 
 describe('polygonShape', () => {

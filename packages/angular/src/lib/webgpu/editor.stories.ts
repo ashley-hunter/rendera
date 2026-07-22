@@ -175,6 +175,17 @@ export const Export: Story = {
 };
 
 /**
+ * **Save / open.** **Save** downloads the whole document as a `.json` file (the
+ * model round-trips exactly — geometry, paints, transforms, live-shape recipes);
+ * **Open** loads one back, replacing the scene and framing it. Edit → Save →
+ * refresh → Open to pick up where you left off. (Image pixels live out-of-band,
+ * so only vector/text content reloads.)
+ */
+export const SaveLoad: Story = {
+  args: { scene: createVectorScene(), selectable: true, drawing: true, fileIo: true },
+};
+
+/**
  * **Everything.** All of the above at once — tools, selection, snapping, align /
  * distribute, grouping, booleans, copy/paste, the layers panel, the properties
  * inspector, rulers + grid, and SVG/PNG export.
@@ -192,6 +203,7 @@ export const Everything: Story = {
     keyboardEditing: true,
     textEditing: true,
     exportable: true,
+    fileIo: true,
     showLayers: true,
     showInspector: true,
     showRulers: true,

@@ -26,6 +26,7 @@ import {
   pasteNodes,
   polygonShape,
   rectShape,
+  SceneDocument,
   EMPTY_SELECTION,
   exportSvg,
   fitBounds,
@@ -79,7 +80,7 @@ import {
   type PathNode,
   type PathPointRef,
   type PenNode,
-  type SceneDocument,
+  type SerializedDocument,
   type Selection,
   type SnapGuide,
   type SpatialNode,
@@ -149,6 +150,8 @@ export class WebGpuScene {
     viewChild<ElementRef<HTMLCanvasElement>>('canvas');
   private readonly textEditRef =
     viewChild<ElementRef<HTMLTextAreaElement>>('textEditor');
+  private readonly fileInputRef =
+    viewChild<ElementRef<HTMLInputElement>>('fileInput');
 
   /** Optional scene to render; defaults to the shared sample document. */
   readonly scene = input<SceneSource | null>(null);
@@ -175,6 +178,8 @@ export class WebGpuScene {
   readonly pathEditing = input(false);
   /** Show SVG / PNG export buttons in the toolbar (default off). */
   readonly exportable = input(false);
+  /** Show Save / Open buttons that round-trip the document as a `.json` file. */
+  readonly fileIo = input(false);
   /** Show the layers panel beside the canvas (default off; implies selectable). */
   readonly showLayers = input(false);
   /** Show the properties inspector beside the canvas (default off; implies selectable). */
@@ -1374,6 +1379,45 @@ export class WebGpuScene {
     a.download = name;
     a.click();
     URL.revokeObjectURL(url);
+  }
+
+  /** Download the whole document as a JSON file (the model round-trips exactly). */
+  protected saveFile(): void {
+    const json = JSON.stringify(this.document.toJSON());
+    this.download('scene.json', new Blob([json], { type: 'application/json' }));
+  }
+
+  /** Open the file picker to load a previously saved document. */
+  protected openFile(): void {
+    this.fileInputRef()?.nativeElement.click();
+  }
+
+  /** A file was chosen: parse it and swap in the loaded document. */
+  protected async onFileChosen(event: Event): Promise<void> {
+    const input = event.target as HTMLInputElement;
+    const file = input.files?.[0];
+    input.value = ''; // allow re-picking the same file later
+    if (!file) return;
+    try {
+      const data = JSON.parse(await file.text()) as SerializedDocument;
+      this.loadDocument(SceneDocument.fromJSON(data));
+    } catch (error) {
+      this.message.set(error instanceof Error ? error.message : String(error));
+    }
+  }
+
+  /** Swap in a freshly loaded document: reset history/selection, re-shape text,
+   *  and frame it. Image pixels are out-of-band, so only vector/text reload. */
+  private loadDocument(doc: SceneDocument): void {
+    this.history?.destroy();
+    this.document = doc;
+    this.history = new History(doc, { limit: 200 });
+    this.selection.set(EMPTY_SELECTION);
+    this.textPaths = new Map();
+    this.textMsdf = new Map();
+    this.reshapeAllTextPaths();
+    this.rev.update((v) => v + 1);
+    this.fit();
   }
 
   protected onWheel(event: WheelEvent): void {

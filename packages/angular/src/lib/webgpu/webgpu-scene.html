@@ -19,6 +19,12 @@
       <button type="button" (click)="exportSvgFile()" [disabled]="renderState() !== 'ready'">SVG</button>
       <button type="button" (click)="exportPngFile()" [disabled]="renderState() !== 'ready'">PNG</button>
     }
+    @if (fileIo()) {
+      <span class="divider"></span>
+      <button type="button" (click)="saveFile()" [disabled]="renderState() !== 'ready'">Save</button>
+      <button type="button" (click)="openFile()" [disabled]="renderState() !== 'ready'">Open</button>
+      <input #fileInput type="file" accept="application/json,.json" class="file-input" (change)="onFileChosen($event)" />
+    }
     @if (grouping() && selectionCount() >= 1) {
       <span class="divider"></span>
       <button type="button" (click)="groupSelection()" [disabled]="selectionCount() < 2" title="Group (Ctrl/Cmd+G)">Group</button>
